@@ -6,8 +6,10 @@
 set -e
 
 INSTALL_DIR="$HOME/crypto-clawie"
-PID_FILE="$INSTALL_DIR/scheduler.pid"
+SCHEDULER_PID="$INSTALL_DIR/scheduler.pid"
+BOT_PID="$INSTALL_DIR/bot.pid"
 LOG_FILE="$INSTALL_DIR/logs/scheduler.log"
+BOT_LOG="$INSTALL_DIR/logs/bot.log"
 IS_UPDATE=false
 
 echo "======================================"
@@ -24,13 +26,14 @@ fi
 # ── 1. 停止旧进程 ──────────────────────────────────────────────────────────
 echo ""
 echo "[1/6] 停止旧进程..."
-if [ -f "$PID_FILE" ]; then
-  OLD_PID=$(cat "$PID_FILE")
-  kill "$OLD_PID" 2>/dev/null && echo "✓ 旧进程 ($OLD_PID) 已停止" || echo "  旧进程不存在，跳过"
-  rm -f "$PID_FILE"
-else
-  echo "  无旧进程，跳过"
-fi
+for pid_file in "$SCHEDULER_PID" "$BOT_PID"; do
+  if [ -f "$pid_file" ]; then
+    OLD_PID=$(cat "$pid_file")
+    kill "$OLD_PID" 2>/dev/null && echo "✓ 旧进程 ($OLD_PID) 已停止" || echo "  旧进程不存在，跳过"
+    rm -f "$pid_file"
+  fi
+done
+echo "✓ 完成"
 
 # ── 2. 拉取代码 ───────────────────────────────────────────────────────────
 echo ""
@@ -144,10 +147,15 @@ source venv/bin/activate
 echo "测试数据抓取..."
 python fetcher.py --task market_snapshot && echo "✓ 数据抓取正常"
 
-# 后台启动调度器，日志写入 logs/scheduler.log
+# 后台启动调度器
 nohup python scheduler.py >> "$LOG_FILE" 2>&1 &
-echo $! > "$PID_FILE"
-echo "✓ clawie-scheduler 已启动 (PID: $(cat $PID_FILE))"
+echo $! > "$SCHEDULER_PID"
+echo "✓ clawie-scheduler 已启动 (PID: $(cat $SCHEDULER_PID))"
+
+# 后台启动 Telegram Bot
+nohup python bot.py >> "$BOT_LOG" 2>&1 &
+echo $! > "$BOT_PID"
+echo "✓ clawie-bot 已启动 (PID: $(cat $BOT_PID))"
 
 echo ""
 echo "======================================"
@@ -158,8 +166,8 @@ else
 fi
 echo "======================================"
 echo ""
-echo "查看日志：    tail -f $LOG_FILE"
-echo "查看状态：    cat $PID_FILE && kill -0 \$(cat $PID_FILE) && echo running"
-echo "停止服务：    kill \$(cat $PID_FILE)"
+echo "查看调度器日志：  tail -f $LOG_FILE"
+echo "查看 Bot 日志：   tail -f $BOT_LOG"
+echo "停止所有服务：    kill \$(cat $SCHEDULER_PID) \$(cat $BOT_PID)"
 echo ""
 
