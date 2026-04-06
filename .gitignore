@@ -1,0 +1,22 @@
+# 用户敏感数据 — 绝对不能提交
+.env
+
+# 运行时生成的数据目录
+data/
+logs/
+reports/
+memory/
+
+# Python
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# 系统文件
+.DS_Store
+*.swp
+*.swo
