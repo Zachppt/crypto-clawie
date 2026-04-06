@@ -2,16 +2,35 @@
 bot.py — Telegram 指令机器人
 直接响应用户命令，实时调用 skill 返回数据，不经过 LLM。
 
-命令：
-  /market            — 市场概览 + 资金费率 Top 5
-  /account           — 我的持仓和余额
-  /funding [symbol]  — 资金费率排行，或指定币种
-  /oi [symbol]       — 未平仓量
-  /liq               — 爆仓风险
-  /news              — 最新快讯
-  /alerts            — 当前异动信号
-  /report            — 今日报告
-  /BTC /ETH /SOL 等  — 快速查询该币种价格 + 资金费率
+命令完整列表：
+  账户
+    /position          — 持仓明细和账户余额
+    /liq               — 爆仓风险评估
+
+  HL 市场
+    /market            — 市场概览（资金费率 + 情绪 + 账户摘要）
+    /funding           — 资金费率排行 Top 20
+    /funding BTC       — 指定币种资金费率详情
+    /oi                — 未平仓量排行 Top 10
+    /oi BTC            — 指定币种未平仓量
+
+  行情
+    /price BTC         — 实时价格（默认 BTC）
+    /fng               — 恐慌贪婪指数
+
+  快讯
+    /news              — 最新快讯（前 10 条）
+    /hlnews            — HL 相关快讯
+
+  信号
+    /alerts            — 全部异动信号扫描
+
+  报告
+    /report            — 今日报告
+    /weekly            — 本周复盘报告
+
+  快捷查询
+    /BTC /ETH /SOL 等  — 价格 + 资金费率（任意 HL 交易对）
 """
 
 import os
@@ -19,6 +38,7 @@ import sys
 import json
 import time
 import logging
+import importlib
 from pathlib import Path
 
 import requests
@@ -54,13 +74,13 @@ API_URL   = f"https://api.telegram.org/bot{BOT_TOKEN}"
 env = {k: os.getenv(k, "") for k in [
     "HL_PRIVATE_KEY", "HL_WALLET_ADDRESS", "HL_USE_TESTNET",
     "HL_DEFAULT_LEVERAGE", "HL_DEFAULT_MARGIN_MODE",
+    "HL_FUNDING_ALERT_THRESHOLD", "HL_LIQ_ALERT_THRESHOLD",
     "BLOCKBEATS_API_KEY", "AUTONOMOUS_MODE", "MAX_POSITION_SIZE_USD",
 ]}
 
 # ── Telegram 工具 ─────────────────────────────────────────────────────────────
 
 def send(chat_id: int, text: str, parse_mode: str = "Markdown"):
-    """发送消息，超长自动截断。"""
     if len(text) > 4000:
         text = text[:4000] + "\n...(内容过长，已截断)"
     try:
@@ -72,25 +92,22 @@ def send(chat_id: int, text: str, parse_mode: str = "Markdown"):
     except Exception as e:
         log.warning(f"send failed: {e}")
 
-# ── Skill 加载 ────────────────────────────────────────────────────────────────
+# ── Skill 工厂 ────────────────────────────────────────────────────────────────
+
+_skill_map = {
+    "hl_monitor":    ("skills.hl_monitor",    "HLMonitorSkill"),
+    "crypto_data":   ("skills.crypto_data",   "CryptoDataSkill"),
+    "crypto_news":   ("skills.crypto_news",   "CryptoNewsSkill"),
+    "crypto_alert":  ("skills.crypto_alert",  "CryptoAlertSkill"),
+    "crypto_report": ("skills.crypto_report", "CryptoReportSkill"),
+}
 
 def skill(name: str):
-    """动态加载并实例化 skill。"""
-    mapping = {
-        "hl_monitor":   ("skills.hl_monitor",   "HLMonitorSkill"),
-        "hl_trade":     ("skills.hl_trade",      "HLTradeSkill"),
-        "crypto_data":  ("skills.crypto_data",   "CryptoDataSkill"),
-        "crypto_news":  ("skills.crypto_news",   "CryptoNewsSkill"),
-        "crypto_alert": ("skills.crypto_alert",  "CryptoAlertSkill"),
-        "crypto_report":("skills.crypto_report", "CryptoReportSkill"),
-    }
-    module_path, class_name = mapping[name]
-    import importlib
+    module_path, class_name = _skill_map[name]
     mod = importlib.import_module(module_path)
-    cls = getattr(mod, class_name)
-    return cls(DATA_DIR, MEMORY_DIR, env)
+    return getattr(mod, class_name)(DATA_DIR, MEMORY_DIR, env)
 
-# ── 已知交易对缓存 ────────────────────────────────────────────────────────────
+# ── 已知交易对 ────────────────────────────────────────────────────────────────
 
 _symbols_cache: set = set()
 
@@ -108,7 +125,39 @@ def known_symbols() -> set:
         pass
     return _symbols_cache
 
-# ── 命令处理 ──────────────────────────────────────────────────────────────────
+# ── 帮助文本 ──────────────────────────────────────────────────────────────────
+
+HELP_TEXT = """🤖 *Clawie 指令列表*
+
+*账户*
+/position — 持仓明细和余额
+/liq — 爆仓风险评估
+
+*HL 市场*
+/market — 市场概览
+/funding — 资金费率排行
+/funding BTC — 指定币种费率
+/oi — 未平仓量排行
+/oi BTC — 指定币种 OI
+
+*行情*
+/price — 价格（默认 BTC）
+/price ETH — 指定币种价格
+/fng — 恐慌贪婪指数
+
+*快讯*
+/news — 最新快讯
+/hlnews — HL 相关快讯
+
+*信号与报告*
+/alerts — 全部异动信号
+/report — 今日报告
+/weekly — 本周复盘
+
+*快捷查询*
+/BTC /ETH /SOL 等任意交易对"""
+
+# ── 命令路由 ──────────────────────────────────────────────────────────────────
 
 def handle(update: dict):
     msg = update.get("message") or update.get("edited_message")
@@ -121,81 +170,116 @@ def handle(update: dict):
     if not text.startswith("/"):
         return
 
-    parts = text.split()
-    cmd   = parts[0].lstrip("/").split("@")[0].lower()
-    args  = parts[1:]
+    parts  = text.split()
+    cmd    = parts[0].lstrip("/").split("@")[0].lower()
+    args   = parts[1:]
 
     log.info(f"cmd=/{cmd} args={args} chat={chat_id}")
 
     try:
-        _dispatch(chat_id, cmd, args)
+        _route(chat_id, cmd, args)
     except Exception as e:
-        log.error(f"handle error: {e}", exc_info=True)
+        log.error(f"route error: {e}", exc_info=True)
         send(chat_id, f"❌ 执行出错：{e}")
 
 
-def _dispatch(chat_id: int, cmd: str, args: list):
-    # /market — 市场概览
-    if cmd == "market":
-        r = skill("hl_monitor").run(action="overview")
-        send(chat_id, r["text"])
+def _route(chat_id: int, cmd: str, args: list):
 
-    # /account /positions /pos — 持仓和余额
-    elif cmd in ("account", "positions", "pos"):
+    # ── 账户 ────────────────────────────────────────────────────────────────
+    if cmd in ("position", "positions", "pos", "账户", "持仓"):
         r = skill("hl_monitor").run(action="account")
         send(chat_id, r["text"])
 
-    # /funding [symbol] — 资金费率
+    elif cmd in ("liq", "liquidation", "risk", "爆仓"):
+        r = skill("hl_monitor").run(action="liquidation")
+        send(chat_id, r["text"])
+
+    # ── HL 市场 ──────────────────────────────────────────────────────────────
+    elif cmd == "market":
+        r = skill("hl_monitor").run(action="overview")
+        send(chat_id, r["text"])
+
     elif cmd == "funding":
         symbol = args[0].upper() if args else None
         r = skill("hl_monitor").run(action="funding", symbol=symbol)
         send(chat_id, r["text"])
 
-    # /oi [symbol] — 未平仓量
     elif cmd == "oi":
         symbol = args[0].upper() if args else None
         r = skill("hl_monitor").run(action="oi", symbol=symbol)
         send(chat_id, r["text"])
 
-    # /liq — 爆仓风险
-    elif cmd in ("liq", "liquidation", "risk"):
-        r = skill("hl_monitor").run(action="liquidation")
+    # ── 行情 ─────────────────────────────────────────────────────────────────
+    elif cmd == "price":
+        symbol = args[0].upper() if args else "BTC"
+        r = skill("crypto_data").run(action="price", symbol=symbol)
         send(chat_id, r["text"])
 
-    # /news — 最新快讯
+    elif cmd in ("fng", "fear", "greed", "情绪"):
+        r = skill("crypto_data").run(action="fng")
+        send(chat_id, r["text"])
+
+    # ── 快讯 ─────────────────────────────────────────────────────────────────
     elif cmd == "news":
-        r = skill("crypto_news").run()
+        r = skill("crypto_news").run(action="latest")
         send(chat_id, r["text"])
 
-    # /alerts — 异动信号
-    elif cmd in ("alerts", "alert", "signals"):
+    elif cmd == "hlnews":
+        r = skill("crypto_news").run(action="hl")
+        send(chat_id, r["text"])
+
+    # ── 信号 ─────────────────────────────────────────────────────────────────
+    elif cmd in ("alerts", "alert", "signals", "信号"):
         r = skill("crypto_alert").run(action="scan")
         send(chat_id, r["text"])
 
-    # /report — 今日报告
-    elif cmd == "report":
+    # ── 报告 ─────────────────────────────────────────────────────────────────
+    elif cmd in ("report", "日报"):
         r = skill("crypto_report").run(period="daily")
         send(chat_id, r["text"])
 
-    # /BTC /ETH /SOL 等 — 快速查询
+    elif cmd in ("weekly", "周报"):
+        r = skill("crypto_report").run(period="weekly")
+        send(chat_id, r["text"])
+
+    # ── 快捷查询任意交易对 ────────────────────────────────────────────────────
     elif cmd.upper() in known_symbols():
         r = skill("hl_monitor").run(action="funding", symbol=cmd.upper())
         send(chat_id, r["text"])
 
-    # /start /help
-    elif cmd in ("start", "help"):
-        send(chat_id, (
-            "🤖 *Clawie 指令列表*\n\n"
-            "/market — 市场概览 + 资金费率\n"
-            "/account — 持仓和余额\n"
-            "/funding \\[symbol\\] — 资金费率排行\n"
-            "/oi \\[symbol\\] — 未平仓量\n"
-            "/liq — 爆仓风险\n"
-            "/news — 最新快讯\n"
-            "/alerts — 异动信号\n"
-            "/report — 今日报告\n\n"
-            "快捷查询：/BTC /ETH /SOL 等"
-        ))
+    # ── 帮助 ─────────────────────────────────────────────────────────────────
+    elif cmd in ("start", "help", "帮助"):
+        send(chat_id, HELP_TEXT)
+
+    else:
+        send(chat_id, f"未知指令 `/{cmd}`，发送 /help 查看所有命令")
+
+# ── 注册 Telegram 命令提示 ────────────────────────────────────────────────────
+
+def register_commands():
+    commands = [
+        {"command": "market",   "description": "市场概览（资金费率+情绪+账户摘要）"},
+        {"command": "position", "description": "我的持仓明细和余额"},
+        {"command": "funding",  "description": "资金费率排行，/funding BTC 查指定币种"},
+        {"command": "oi",       "description": "未平仓量排行，/oi BTC 查指定币种"},
+        {"command": "liq",      "description": "爆仓风险评估"},
+        {"command": "price",    "description": "实时价格，/price ETH 查指定币种"},
+        {"command": "fng",      "description": "恐慌贪婪指数"},
+        {"command": "news",     "description": "最新快讯（前10条）"},
+        {"command": "hlnews",   "description": "Hyperliquid 相关快讯"},
+        {"command": "alerts",   "description": "全部异动信号扫描"},
+        {"command": "report",   "description": "今日市场报告"},
+        {"command": "weekly",   "description": "本周复盘报告"},
+        {"command": "help",     "description": "查看所有指令"},
+    ]
+    try:
+        r = requests.post(f"{API_URL}/setMyCommands", json={"commands": commands}, timeout=10)
+        if r.json().get("ok"):
+            log.info(f"Telegram commands registered ({len(commands)} commands)")
+        else:
+            log.warning(f"setMyCommands failed: {r.text}")
+    except Exception as e:
+        log.warning(f"register_commands error: {e}")
 
 # ── 主循环 ────────────────────────────────────────────────────────────────────
 
@@ -204,6 +288,7 @@ def main():
         log.error("TELEGRAM_BOT_TOKEN not set in .env")
         sys.exit(1)
 
+    register_commands()
     log.info("Clawie bot starting (long polling)...")
     offset = 0
 
