@@ -1,38 +1,50 @@
 #!/bin/bash
-# setup.sh — crypto-clawie VPS 一键部署脚本
-# 用法：bash setup.sh
+# setup.sh — crypto-clawie VPS 一键部署/更新脚本
+# 首次部署：bash <(curl -s https://raw.githubusercontent.com/Zachppt/crypto-clawie/main/setup.sh)
+# 后续更新：cd ~/crypto-clawie && bash setup.sh
 
 set -e
+
+INSTALL_DIR="$HOME/crypto-clawie"
+IS_UPDATE=false
+
 echo "======================================"
 echo "  crypto-clawie 部署脚本"
 echo "======================================"
 
-INSTALL_DIR="$HOME/crypto-clawie"
+# ── 判断首次部署还是更新 ───────────────────────────────────────────────────
+if [ -f "$INSTALL_DIR/.env" ]; then
+  IS_UPDATE=true
+  echo ""
+  echo "  检测到已有安装，进入更新模式"
+fi
 
-# ── 1. 删除旧 Agent ────────────────────────────────────────────────────────
+# ── 1. 清理旧版 Agent（仅首次）────────────────────────────────────────────
 echo ""
 echo "[1/6] 清理旧 Agent..."
 pm2 delete crypto-agent 2>/dev/null || true
-pm2 delete clawie-scheduler 2>/dev/null || true
-rm -rf "$HOME/crypto-agent"
-echo "✓ 旧 Agent 已删除"
-
-# ── 2. 克隆新项目 ──────────────────────────────────────────────────────────
-echo ""
-echo "[2/6] 克隆 crypto-clawie..."
-if [ -d "$INSTALL_DIR" ]; then
-  echo "目录已存在，执行 git pull..."
-  cd "$INSTALL_DIR" && git pull
-else
-  # 替换为你的 GitHub 仓库地址
-  git clone https://github.com/Zachppt/crypto-clawie.git "$INSTALL_DIR"
+if [ "$IS_UPDATE" = false ]; then
+  pm2 delete clawie-scheduler 2>/dev/null || true
+  rm -rf "$HOME/crypto-agent"
 fi
-cd "$INSTALL_DIR"
+echo "✓ 完成"
+
+# ── 2. 拉取代码 ───────────────────────────────────────────────────────────
+echo ""
+echo "[2/6] 拉取最新代码..."
+if [ -d "$INSTALL_DIR" ]; then
+  cd "$INSTALL_DIR"
+  # 保护用户数据，只更新代码文件
+  git pull --ff-only
+else
+  git clone https://github.com/Zachppt/crypto-clawie.git "$INSTALL_DIR"
+  cd "$INSTALL_DIR"
+fi
 echo "✓ 代码已就绪"
 
-# ── 3. Python 虚拟环境 ────────────────────────────────────────────────────
+# ── 3. Python 依赖 ────────────────────────────────────────────────────────
 echo ""
-echo "[3/6] 安装 Python 依赖..."
+echo "[3/6] 安装/更新 Python 依赖..."
 python3 -m venv venv
 source venv/bin/activate
 pip install --upgrade pip -q
@@ -48,8 +60,45 @@ echo "✓ 目录已创建"
 # ── 5. 环境变量 ────────────────────────────────────────────────────────────
 echo ""
 echo "[5/6] 配置环境变量..."
-if [ ! -f .env ]; then
-  cp .env.example .env
+if [ -f .env ]; then
+  echo "✓ .env 已存在，保留用户配置，跳过"
+else
+  # 直接生成模板，不依赖 .env.example
+  cat > .env << 'ENVEOF'
+# ============================================================
+# crypto-clawie 环境变量配置
+# 切勿将此文件提交到 Git！
+# ============================================================
+
+# ── Hyperliquid（必填）───────────────────────────────────────
+HL_PRIVATE_KEY=0x               # EVM 私钥
+HL_WALLET_ADDRESS=0x            # 对应钱包地址
+HL_USE_TESTNET=false            # true = 先用测试网验证
+HL_DEFAULT_LEVERAGE=3           # 默认杠杆（1–50）
+HL_DEFAULT_MARGIN_MODE=cross    # cross | isolated
+HL_FUNDING_ALERT_THRESHOLD=0.0005
+HL_LIQ_ALERT_THRESHOLD=0.15
+
+# ── Telegram（必填）──────────────────────────────────────────
+TELEGRAM_BOT_TOKEN=             # BotFather 获取
+TELEGRAM_CHAT_ID=               # 你的 Chat ID
+TELEGRAM_ALERT_CHAT_ID=        # 预警频道（可选，默认同上）
+
+# ── 新闻 ──────────────────────────────────────────────────────
+BLOCKBEATS_API_KEY=             # BlockBeats API Key（推荐）
+
+# ── 调度器 ───────────────────────────────────────────────────
+FETCH_INTERVAL_MIN=5
+NEWS_INTERVAL_MIN=15
+DAILY_REPORT_HOUR=8             # CST 小时数
+
+# ── 安全 ─────────────────────────────────────────────────────
+AUTONOMOUS_MODE=false           # true = 允许自动执行交易（谨慎！）
+MAX_POSITION_SIZE_USD=1000      # 单笔最大仓位（USD）
+ENVEOF
+
+  chmod 600 .env   # 仅当前用户可读，防止其他用户查看私钥
+
   echo ""
   echo "⚠️  请编辑 .env 文件，填入以下必填项："
   echo "    HL_PRIVATE_KEY     — Hyperliquid 私钥"
@@ -60,8 +109,6 @@ if [ ! -f .env ]; then
   echo "    编辑命令：nano $INSTALL_DIR/.env"
   echo ""
   read -p "编辑完成后按 Enter 继续..." _
-else
-  echo "✓ .env 已存在，跳过"
 fi
 
 # ── 6. 更新 OpenClaw 配置 ─────────────────────────────────────────────────
@@ -69,9 +116,7 @@ echo ""
 echo "[6/6] 更新 OpenClaw 配置..."
 OPENCLAW_JSON="$HOME/.openclaw/openclaw.json"
 if [ -f "$OPENCLAW_JSON" ]; then
-  # 备份旧配置
   cp "$OPENCLAW_JSON" "${OPENCLAW_JSON}.bak"
-  # 用 python 更新 workspace 路径
   python3 - <<PYEOF
 import json
 with open("$OPENCLAW_JSON") as f:
@@ -79,13 +124,13 @@ with open("$OPENCLAW_JSON") as f:
 cfg["workspace"] = "$INSTALL_DIR"
 with open("$OPENCLAW_JSON", "w") as f:
     json.dump(cfg, f, indent=2)
-print("✓ openclaw.json workspace 已更新为 $INSTALL_DIR")
+print("✓ openclaw.json workspace 已更新")
 PYEOF
 else
   echo "⚠️  未找到 openclaw.json，请手动将 workspace 指向 $INSTALL_DIR"
 fi
 
-# ── 启动 ───────────────────────────────────────────────────────────────────
+# ── 启动 / 重启服务 ───────────────────────────────────────────────────────
 echo ""
 echo "======================================"
 echo "  启动服务"
@@ -93,26 +138,34 @@ echo "======================================"
 
 source venv/bin/activate
 
-# 测试抓取一次
+# 测试数据抓取
 echo "测试数据抓取..."
 python fetcher.py --task market_snapshot && echo "✓ 数据抓取正常"
 
-# 启动调度器
-pm2 start scheduler.py \
-  --name clawie-scheduler \
-  --interpreter "$INSTALL_DIR/venv/bin/python3" \
-  --cwd "$INSTALL_DIR"
+# 更新模式：重启；首次：启动
+if [ "$IS_UPDATE" = true ]; then
+  pm2 restart clawie-scheduler
+  echo "✓ clawie-scheduler 已重启"
+else
+  pm2 start scheduler.py \
+    --name clawie-scheduler \
+    --interpreter "$INSTALL_DIR/venv/bin/python3" \
+    --cwd "$INSTALL_DIR"
+  echo "✓ clawie-scheduler 已启动"
+fi
 
 pm2 save
-echo "✓ clawie-scheduler 已启动"
 
 echo ""
 echo "======================================"
-echo "  部署完成！"
+if [ "$IS_UPDATE" = true ]; then
+  echo "  更新完成！"
+else
+  echo "  部署完成！"
+fi
 echo "======================================"
 echo ""
 echo "查看日志：    pm2 logs clawie-scheduler"
 echo "查看状态：    pm2 status"
-echo "手动抓取：    cd $INSTALL_DIR && source venv/bin/activate && python fetcher.py"
 echo "重启调度器：  pm2 restart clawie-scheduler"
 echo ""
