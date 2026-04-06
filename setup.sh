@@ -123,9 +123,10 @@ import json
 with open("$OPENCLAW_JSON") as f:
     cfg = json.load(f)
 cfg["workspace"] = "$INSTALL_DIR"
+cfg.setdefault("agents", {}).setdefault("defaults", {})["workspace"] = "$INSTALL_DIR"
 with open("$OPENCLAW_JSON", "w") as f:
     json.dump(cfg, f, indent=2)
-print("✓ openclaw.json workspace 已更新")
+print("✓ openclaw.json workspace 已更新（顶层 + agents.defaults）")
 PYEOF
 else
   echo "⚠️  未找到 openclaw.json，请手动将 workspace 指向 $INSTALL_DIR"
@@ -161,3 +162,4 @@ echo "查看日志：    tail -f $LOG_FILE"
 echo "查看状态：    cat $PID_FILE && kill -0 \$(cat $PID_FILE) && echo running"
 echo "停止服务：    kill \$(cat $PID_FILE)"
 echo ""
+
