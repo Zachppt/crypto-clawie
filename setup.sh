@@ -6,6 +6,8 @@
 set -e
 
 INSTALL_DIR="$HOME/crypto-clawie"
+PID_FILE="$INSTALL_DIR/scheduler.pid"
+LOG_FILE="$INSTALL_DIR/logs/scheduler.log"
 IS_UPDATE=false
 
 echo "======================================"
@@ -19,22 +21,22 @@ if [ -f "$INSTALL_DIR/.env" ]; then
   echo "  检测到已有安装，进入更新模式"
 fi
 
-# ── 1. 清理旧版 Agent（仅首次）────────────────────────────────────────────
+# ── 1. 停止旧进程 ──────────────────────────────────────────────────────────
 echo ""
-echo "[1/6] 清理旧 Agent..."
-pm2 delete crypto-agent 2>/dev/null || true
-if [ "$IS_UPDATE" = false ]; then
-  pm2 delete clawie-scheduler 2>/dev/null || true
-  rm -rf "$HOME/crypto-agent"
+echo "[1/6] 停止旧进程..."
+if [ -f "$PID_FILE" ]; then
+  OLD_PID=$(cat "$PID_FILE")
+  kill "$OLD_PID" 2>/dev/null && echo "✓ 旧进程 ($OLD_PID) 已停止" || echo "  旧进程不存在，跳过"
+  rm -f "$PID_FILE"
+else
+  echo "  无旧进程，跳过"
 fi
-echo "✓ 完成"
 
 # ── 2. 拉取代码 ───────────────────────────────────────────────────────────
 echo ""
 echo "[2/6] 拉取最新代码..."
 if [ -d "$INSTALL_DIR" ]; then
   cd "$INSTALL_DIR"
-  # 保护用户数据，只更新代码文件
   git pull --ff-only
 else
   git clone https://github.com/Zachppt/crypto-clawie.git "$INSTALL_DIR"
@@ -63,7 +65,6 @@ echo "[5/6] 配置环境变量..."
 if [ -f .env ]; then
   echo "✓ .env 已存在，保留用户配置，跳过"
 else
-  # 直接生成模板，不依赖 .env.example
   cat > .env << 'ENVEOF'
 # ============================================================
 # crypto-clawie 环境变量配置
@@ -97,7 +98,7 @@ AUTONOMOUS_MODE=false           # true = 允许自动执行交易（谨慎！）
 MAX_POSITION_SIZE_USD=1000      # 单笔最大仓位（USD）
 ENVEOF
 
-  chmod 600 .env   # 仅当前用户可读，防止其他用户查看私钥
+  chmod 600 .env
 
   echo ""
   echo "⚠️  请编辑 .env 文件，填入以下必填项："
@@ -130,7 +131,7 @@ else
   echo "⚠️  未找到 openclaw.json，请手动将 workspace 指向 $INSTALL_DIR"
 fi
 
-# ── 启动 / 重启服务 ───────────────────────────────────────────────────────
+# ── 启动服务 ──────────────────────────────────────────────────────────────
 echo ""
 echo "======================================"
 echo "  启动服务"
@@ -142,19 +143,10 @@ source venv/bin/activate
 echo "测试数据抓取..."
 python fetcher.py --task market_snapshot && echo "✓ 数据抓取正常"
 
-# 更新模式：重启；首次：启动
-if [ "$IS_UPDATE" = true ]; then
-  pm2 restart clawie-scheduler
-  echo "✓ clawie-scheduler 已重启"
-else
-  pm2 start scheduler.py \
-    --name clawie-scheduler \
-    --interpreter "$INSTALL_DIR/venv/bin/python3" \
-    --cwd "$INSTALL_DIR"
-  echo "✓ clawie-scheduler 已启动"
-fi
-
-pm2 save
+# 后台启动调度器，日志写入 logs/scheduler.log
+nohup python scheduler.py >> "$LOG_FILE" 2>&1 &
+echo $! > "$PID_FILE"
+echo "✓ clawie-scheduler 已启动 (PID: $(cat $PID_FILE))"
 
 echo ""
 echo "======================================"
@@ -165,7 +157,7 @@ else
 fi
 echo "======================================"
 echo ""
-echo "查看日志：    pm2 logs clawie-scheduler"
-echo "查看状态：    pm2 status"
-echo "重启调度器：  pm2 restart clawie-scheduler"
+echo "查看日志：    tail -f $LOG_FILE"
+echo "查看状态：    cat $PID_FILE && kill -0 \$(cat $PID_FILE) && echo running"
+echo "停止服务：    kill \$(cat $PID_FILE)"
 echo ""
