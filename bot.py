@@ -257,7 +257,7 @@ def _route(chat_id: int, cmd: str, args: list):
 # ── 注册 Telegram 命令提示 ────────────────────────────────────────────────────
 
 def register_commands():
-    commands = [
+    our_commands = [
         {"command": "market",   "description": "市场概览（资金费率+情绪+账户摘要）"},
         {"command": "position", "description": "我的持仓明细和余额"},
         {"command": "funding",  "description": "资金费率排行，/funding BTC 查指定币种"},
@@ -272,10 +272,17 @@ def register_commands():
         {"command": "weekly",   "description": "本周复盘报告"},
         {"command": "help",     "description": "查看所有指令"},
     ]
+    our_names = {c["command"] for c in our_commands}
+
     try:
-        r = requests.post(f"{API_URL}/setMyCommands", json={"commands": commands}, timeout=10)
+        # 获取现有命令
+        existing = requests.get(f"{API_URL}/getMyCommands", timeout=10).json().get("result", [])
+        # 保留不属于我们的命令，避免覆盖其他功能
+        kept = [c for c in existing if c["command"] not in our_names]
+        merged = kept + our_commands
+        r = requests.post(f"{API_URL}/setMyCommands", json={"commands": merged}, timeout=10)
         if r.json().get("ok"):
-            log.info(f"Telegram commands registered ({len(commands)} commands)")
+            log.info(f"Telegram commands registered ({len(our_commands)} new, {len(kept)} kept, {len(merged)} total)")
         else:
             log.warning(f"setMyCommands failed: {r.text}")
     except Exception as e:
