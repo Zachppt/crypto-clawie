@@ -82,6 +82,49 @@ class HLTradeSkill(BaseSkill):
         dec = self._get_sz_decimals(info, symbol)
         return round(size_usd / price, dec)
 
+    # ── 熔断检查 ──────────────────────────────────────────────────────────────
+
+    def _check_circuit_breaker(self) -> tuple[bool, str]:
+        """
+        检查每日亏损熔断。
+        返回 (blocked: bool, reason: str)。
+        当日亏损超过账户 MAX_DAILY_LOSS_PCT% 时禁止新开仓。
+        """
+        max_loss_pct = float(self.getenv("MAX_DAILY_LOSS_PCT", "5"))
+
+        account = self.load("hl_account.json")
+        if not account:
+            return False, ""
+        acct_val = account.get("account_value_usdc", 0)
+        if not acct_val:
+            return False, ""
+
+        history_path = self.data_dir.parent / "memory" / "trade_history.json"
+        if not history_path.exists():
+            return False, ""
+
+        today = datetime.now(timezone.utc).date().isoformat()
+        try:
+            with open(history_path) as f:
+                history = json.load(f)
+        except Exception:
+            return False, ""
+
+        today_loss = sum(
+            t.get("realized_pnl", 0)
+            for t in history
+            if t.get("timestamp", "")[:10] == today and t.get("realized_pnl", 0) < 0
+        )
+
+        loss_pct = abs(today_loss) / acct_val * 100
+        if loss_pct >= max_loss_pct:
+            return True, (
+                f"今日亏损 `${abs(today_loss):.2f}` ({loss_pct:.1f}%) "
+                f"已达熔断阈值 {max_loss_pct}%，新开仓已禁止\n"
+                f"如需强制继续，请发送 `/override_circuit`"
+            )
+        return False, ""
+
     # ── 开仓 ─────────────────────────────────────────────────────────────────
 
     def _open_position(self, symbol: str = "ETH", side: str = "long",
@@ -89,17 +132,22 @@ class HLTradeSkill(BaseSkill):
                        order_type: str = "market", price: float = None,
                        margin_mode: str = None, **_) -> dict:
 
-        # 安全检查
+        # 熔断检查（优先于 autonomous_mode 检查）
+        blocked, reason = self._check_circuit_breaker()
+        if blocked:
+            return self.err(f"🔴 *熔断触发*\n{reason}")
+
+        # 确认流程：autonomous_mode=false 时返回确认请求（非错误）
         autonomous = self.getenv("AUTONOMOUS_MODE", "false").lower() == "true"
         if not autonomous:
-            return self.err(
-                f"自动交易未启用。\n"
-                f"确认开仓参数：\n"
-                f"• 标的：{symbol}\n"
+            lev = leverage or self.getenv("HL_DEFAULT_LEVERAGE", "3")
+            return self.pending(
+                f"⏳ *请确认开仓*\n\n"
+                f"• 标的：`{symbol}`\n"
                 f"• 方向：{'做多 📈' if side == 'long' else '做空 📉'}\n"
-                f"• 金额：${size_usd} USDC\n"
-                f"• 杠杆：{leverage or self.getenv('HL_DEFAULT_LEVERAGE', '3')}x\n\n"
-                f"如需执行，请在 .env 中设置 AUTONOMOUS_MODE=true，或直接告诉我确认。"
+                f"• 金额：`${size_usd}` USDC\n"
+                f"• 杠杆：`{lev}x`\n\n"
+                f"回复 *确认* 执行，或 /cancel 取消"
             )
 
         max_pos = float(self.getenv("MAX_POSITION_SIZE_USD", "1000"))
@@ -301,7 +349,8 @@ class HLTradeSkill(BaseSkill):
 
     # ── 记录交易 ──────────────────────────────────────────────────────────────
 
-    def _record_trade(self, symbol, side, sz, price, leverage, order_result):
+    def _record_trade(self, symbol, side, sz, price, leverage, order_result,
+                      realized_pnl: float = 0.0):
         history_path = self.data_dir.parent / "memory" / "trade_history.json"
         try:
             if history_path.exists():
@@ -311,12 +360,13 @@ class HLTradeSkill(BaseSkill):
                 history = []
 
             history.append({
-                "timestamp":  datetime.now(timezone.utc).isoformat(),
-                "symbol":     symbol,
-                "side":       side,
-                "size":       sz,
-                "price":      price,
-                "leverage":   leverage,
+                "timestamp":    datetime.now(timezone.utc).isoformat(),
+                "symbol":       symbol,
+                "side":         side,
+                "size":         sz,
+                "price":        price,
+                "leverage":     leverage,
+                "realized_pnl": realized_pnl,
                 "platform":   "hyperliquid",
                 "raw_result": str(order_result),
             })

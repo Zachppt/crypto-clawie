@@ -67,6 +67,11 @@ class BaseSkill:
     def err(message: str) -> dict:
         return {"success": False, "text": f"❌ {message}", "data": {}}
 
+    @staticmethod
+    def pending(text: str, data: dict = None) -> dict:
+        """等待用户确认的操作响应，不是错误。"""
+        return {"status": "pending", "success": False, "text": text, "data": data or {}}
+
     # ── 子类必须实现 ──────────────────────────────────────────────────────────
 
     def run(self, **kwargs) -> dict:
