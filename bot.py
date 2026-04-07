@@ -100,6 +100,8 @@ _skill_map = {
     "crypto_news":   ("skills.crypto_news",   "CryptoNewsSkill"),
     "crypto_alert":  ("skills.crypto_alert",  "CryptoAlertSkill"),
     "crypto_report": ("skills.crypto_report", "CryptoReportSkill"),
+    "funding_arb":   ("skills.funding_arb",   "FundingArbSkill"),
+    "hl_grid":       ("skills.hl_grid",       "HLGridSkill"),
 }
 
 def skill(name: str):
@@ -242,6 +244,38 @@ def _route(chat_id: int, cmd: str, args: list):
         r = skill("crypto_report").run(period="weekly")
         send(chat_id, r["text"])
 
+    # ── 套利策略 ─────────────────────────────────────────────────────────────
+    elif cmd in ("arb",):
+        sub = args[0].lower() if args else "scan"
+        sym  = args[1].upper() if len(args) > 1 else None
+        size = float(args[2]) if len(args) > 2 else 100.0
+        r = skill("funding_arb").run(action=sub, symbol=sym, size_usd=size)
+        send(chat_id, r["text"])
+
+    # ── 网格交易 ─────────────────────────────────────────────────────────────
+    elif cmd in ("grid",):
+        if not args:
+            r = skill("hl_grid").run(action="status")
+        elif args[0].lower() == "cancel" and len(args) > 1:
+            r = skill("hl_grid").run(action="cancel", grid_id=args[1])
+        elif args[0].upper() in known_symbols() and len(args) >= 3:
+            r = skill("hl_grid").run(action="create", args=args)
+        else:
+            r = skill("hl_grid").run(action="status")
+        send(chat_id, r["text"])
+
+    # ── 回测 ─────────────────────────────────────────────────────────────────
+    elif cmd in ("backtest", "bt"):
+        send(chat_id, "⏳ 正在运行回测（合成数据）...")
+        try:
+            from backtest.engine import BacktestEngine, FundingArbStrategy
+            engine = BacktestEngine()
+            engine.load_sample_data(n_periods=300)
+            result = engine.run(FundingArbStrategy(entry_threshold=0.0005))
+            send(chat_id, result.summary())
+        except Exception as e:
+            send(chat_id, f"❌ 回测失败：{e}")
+
     # ── 快捷查询任意交易对 ────────────────────────────────────────────────────
     elif cmd.upper() in known_symbols():
         r = skill("hl_monitor").run(action="funding", symbol=cmd.upper())
@@ -270,6 +304,9 @@ def register_commands():
         {"command": "alerts",   "description": "全部异动信号扫描"},
         {"command": "report",   "description": "今日市场报告"},
         {"command": "weekly",   "description": "本周复盘报告"},
+        {"command": "arb",      "description": "套利 — /arb scan | /arb open BTC 500 | /arb status"},
+        {"command": "grid",     "description": "网格 — /grid BTC 90000 100000 10 50 | /grid status"},
+        {"command": "backtest", "description": "策略回测（合成数据快速验证）"},
         {"command": "help",     "description": "查看所有指令"},
     ]
     our_names = {c["command"] for c in our_commands}
