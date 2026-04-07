@@ -93,6 +93,7 @@ class FundingArbSkill(BaseSkill):
 
         market   = self.load("hl_market.json")
         assets   = {a["symbol"]: a for a in market.get("assets", [])} if market else {}
+        data_stale = not market
         now_ts   = datetime.now(timezone.utc).timestamp()
         total    = 0.0
         lines    = [f"📋 *套利仓位状态* — {len(positions)} 个\n"]
@@ -104,7 +105,12 @@ class FundingArbSkill(BaseSkill):
             hours_held   = (now_ts - pos.get("opened_at", now_ts)) / 3600
             est_income   = abs(entry_rate) * pos.get("size_usd", 0) * (hours_held / 8)
             total       += est_income
-            exit_signal  = "🔴 建议平仓" if abs(cur_rate) <= self.EXIT_THRESHOLD else "🟢 持有中"
+            if data_stale:
+                exit_signal = "⚠️ 数据未就绪，无法判断"
+            elif abs(cur_rate) <= self.EXIT_THRESHOLD:
+                exit_signal = "🔴 建议平仓"
+            else:
+                exit_signal = "🟢 持有中"
 
             lines.append(
                 f"• `{sym}` {pos.get('side', 'short')} | ${pos.get('size_usd', 0):.0f}\n"

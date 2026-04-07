@@ -154,7 +154,7 @@ class BacktestEngine:
                 price_drift = 1 + random.gauss(0, 0.015)
 
                 self.data.append({
-                    "timestamp":   f"2024-01-01T{(i*8)%24:02d}:00:00Z",
+                    "timestamp":   f"2024-{(i//90)+1:02d}-{(i//3)%30+1:02d}T{(i*8)%24:02d}:00:00Z",
                     "symbol":      sym,
                     "funding_8h":  round(base_rate, 6),
                     "mark_price":  round(base_prices[sym] * price_drift, 2),
