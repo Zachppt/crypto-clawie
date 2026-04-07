@@ -1,148 +1,169 @@
 # 🤖 crypto-clawie
 
-> A Hyperliquid perpetual contract trading agent built on the **OpenClaw framework**.
-> Monitors funding rates, executes perp orders, detects liquidation risk, and delivers real-time alerts via Telegram.
+> A Hyperliquid perpetual contract trading agent — monitors funding rates, executes perp orders, detects liquidation risk, runs funding arbitrage strategies, and delivers real-time alerts via Telegram.
 
-**Version:** 1.0.0 · **Python:** ≥ 3.10 · **License:** MIT
+**Version:** 2.0.0 · **Python:** ≥ 3.10 · **License:** MIT
 
 ---
 
-## Features
+## What's New in v2
 
-| Skill | Description |
+| Area | Upgrade |
 |---|---|
-| 📡 **HL Monitor** | Funding rates, open interest, liquidation risk, account positions |
-| ⚡ **HL Trade** | Open/close positions, set leverage, cancel orders on Hyperliquid |
-| 📊 **Crypto Data** | Price tracking, Fear & Greed index via Binance + CoinGecko |
-| 🔔 **Alert** | Funding rate spikes, price anomalies, liquidation warnings |
-| 📰 **News** | BlockBeats flash news, HL-related event filtering |
-| 📋 **Report** | Daily & weekly market + account summaries |
+| ⚡ **Performance** | Async concurrent fetcher (aiohttp) — 4 data sources in parallel, ~3s vs ~12s |
+| 🔔 **Alerts** | SQLite-backed deduplication — survives restarts, no more alert spam |
+| 🎯 **Signals** | Multi-factor confidence scoring — funding + OI + price momentum confluence |
+| 💰 **Strategy** | Funding rate arbitrage skill — scan, open, track, close delta-neutral positions |
+| 📊 **Grid** | Grid trading manager — place layered limit orders across a price range |
+| 🧪 **Backtest** | Backtesting engine for strategy parameter validation |
+| 🛡️ **Safety** | Daily loss circuit breaker — auto-blocks new positions after loss threshold |
+| 🔧 **UX** | Telegram Inline confirmation flow, clear Binance hedge quantities, honest pending state |
 
 ---
 
 ## Architecture
 
 ```
-OpenClaw (Telegram ↔ LLM)
-        │
-        ▼
-   AGENTS.md          ← Session protocol (what to read at startup)
-   SOUL.md            ← Agent identity & rules
-   SKILLS.md          ← Skill index
-        │
-        ▼
-   skills/
-   ├── hl_trade/      ← Hyperliquid order execution (EIP-712 via SDK)
-   ├── hl_monitor/    ← Funding rates, positions, liquidation risk
-   ├── crypto_data/   ← Price data & Fear/Greed index
-   ├── crypto_alert/  ← Signal scanner
-   ├── crypto_news/   ← BlockBeats news
-   └── crypto_report/ ← Daily/weekly reports
+Telegram ↔ bot.py (command router)
+              │
+              ├── skills/hl_monitor     ← funding rates, OI, positions, liquidation
+              ├── skills/hl_trade       ← open/close/leverage/cancel (EIP-712)
+              ├── skills/funding_arb    ← delta-neutral funding arbitrage
+              ├── skills/hl_grid        ← grid order management
+              ├── skills/crypto_alert   ← multi-factor signal scoring
+              ├── skills/crypto_data    ← price + Fear & Greed
+              ├── skills/crypto_news    ← BlockBeats news
+              ├── skills/crypto_report  ← daily/weekly reports
+              └── backtest/engine       ← offline strategy backtesting
 
-Background processes (pm2):
-   fetcher.py         ← Caches market + HL data every 5 min
-   scheduler.py       ← Monitors alerts, pushes Telegram notifications
+Background (pm2):
+  scheduler.py  ← APScheduler: fetch every 5m, alerts, daily/weekly reports
+  fetcher.py    ← async aiohttp: HL + Binance + FNG + BlockBeats concurrent
+  db.py         ← SQLite alert deduplication state
 ```
 
 ---
 
 ## Quick Start
 
-### 1. Clone & Setup (VPS)
+### 1. Deploy (VPS one-liner)
 
 ```bash
 bash <(curl -s https://raw.githubusercontent.com/Zachppt/crypto-clawie/main/setup.sh)
 ```
 
-The setup script will:
-- Remove the old `crypto-agent` directory
-- Clone this repo to `~/crypto-clawie`
-- Create a Python virtual environment and install dependencies
-- Prompt you to fill in `.env`
-- Update OpenClaw workspace config
-- Start the scheduler via pm2
-
 ### 2. Configure `.env`
 
 ```env
-# Required for trading
+# Required
 HL_PRIVATE_KEY=0x...
 HL_WALLET_ADDRESS=0x...
+TELEGRAM_BOT_TOKEN=...
+TELEGRAM_CHAT_ID=...
 
-# Required for Telegram alerts
-TELEGRAM_BOT_TOKEN=
-TELEGRAM_CHAT_ID=
-
-# Optional but recommended
-BLOCKBEATS_API_KEY=
-HL_USE_TESTNET=false
-AUTONOMOUS_MODE=false
-MAX_POSITION_SIZE_USD=1000
+# Recommended
+HL_USE_TESTNET=true          # Start on testnet
+AUTONOMOUS_MODE=false        # Manual confirm all trades
+MAX_POSITION_SIZE_USD=500
+MAX_DAILY_LOSS_PCT=5         # Circuit breaker threshold
 ```
 
 ### 3. Verify
 
 ```bash
-pm2 status                         # scheduler should be online
-pm2 logs clawie-scheduler          # check for errors
-cat ~/crypto-clawie/data/hl_market.json | python3 -m json.tool
+pm2 status
+pm2 logs clawie-scheduler
 ```
 
 ---
 
-## Directory Structure
+## Telegram Commands
 
-```
-crypto-clawie/
-├── AGENTS.md              ← OpenClaw session protocol
-├── SOUL.md                ← Agent identity & behavior rules
-├── USER.md                ← User preferences
-├── MEMORY.md              ← Long-term memory
-├── HEARTBEAT.md           ← Scheduled task config
-├── TOOLS.md               ← API & tool reference
-├── fetcher.py             ← Data fetcher (Binance + HL + BlockBeats)
-├── scheduler.py           ← Background scheduler (APScheduler)
-├── setup.sh               ← One-command VPS deploy script
-├── requirements.txt
-├── .env.example
-├── skills/
-│   ├── base.py            ← BaseSkill class
-│   ├── hl_trade/          ← Hyperliquid trading
-│   ├── hl_monitor/        ← HL market monitoring
-│   ├── crypto_data/       ← Price & market data
-│   ├── crypto_alert/      ← Anomaly detection
-│   ├── crypto_news/       ← News scanning
-│   └── crypto_report/     ← Report generation
-├── data/                  ← JSON cache (auto-created)
-├── memory/                ← Daily conversation logs
-├── reports/               ← Generated reports
-└── logs/                  ← Script logs
-```
+### Account
+| Command | Description |
+|---|---|
+| `/position` | Holdings and account balance |
+| `/liq` | Liquidation risk assessment |
+
+### Market
+| Command | Description |
+|---|---|
+| `/market` | Overview: funding + sentiment + account |
+| `/funding` | Funding rate leaderboard Top 20 |
+| `/funding BTC` | Single asset funding details |
+| `/oi` | Open interest Top 10 |
+| `/price ETH` | Real-time price |
+| `/fng` | Fear & Greed index |
+| `/BTC` `/ETH` `/SOL` | Quick: price + funding for any HL symbol |
+
+### Alerts & Reports
+| Command | Description |
+|---|---|
+| `/alerts` | Multi-factor signal scan with confidence scores |
+| `/report` | Daily market + account summary |
+| `/weekly` | Weekly recap |
+| `/news` | Latest BlockBeats flash news |
+| `/hlnews` | HL-related news only |
+
+### Strategy
+| Command | Description |
+|---|---|
+| `/arb scan` | Scan funding arbitrage opportunities |
+| `/arb open BTC 500` | Record arb position ($500 USDC) |
+| `/arb status` | View active arb positions + estimated income |
+| `/arb close BTC` | Close arb position record |
+| `/grid BTC 90000 100000 10 50` | Create grid (low high count size_per_grid_usd) |
+| `/grid` | View all active grids |
+| `/grid cancel <grid_id>` | Cancel a grid |
+| `/backtest` | Run funding arb backtest on synthetic data |
 
 ---
 
-## Hyperliquid Trading
+## Funding Rate Arbitrage
 
-All orders are signed using **EIP-712** via the official `hyperliquid-python-sdk`:
+Delta-neutral strategy: short HL perp + long Binance spot = collect funding with no directional exposure.
 
-```
-HL_PRIVATE_KEY → eth_account.Account → Exchange SDK → Hyperliquid API
-```
-
-- Private key loaded **lazily** — only when a trade fires
-- Never written to any file or log
-- Autonomous trading disabled by default (`AUTONOMOUS_MODE=false`)
-
-### Supported Actions (via Telegram)
+**Entry:** `|funding_8h| ≥ 0.05%` (≈ 54% annualized)  
+**Exit:** `|funding_8h| ≤ 0.01%`
 
 ```
-查看持仓 / 账户余额
-查看资金费率
-以 3 倍杠杆做多 ETH 100 USDC
-平仓 ETH
-设置 BTC 杠杆为 5 倍
-撤销订单 [order_id]
+/arb scan               → find opportunities
+/arb open BTC 500       → record HL short + shows exact Binance buy qty
+/arb status             → track income, see exit signal
+/arb close BTC          → close record + shows exact Binance sell qty
 ```
+
+> Note: The HL perp leg executes automatically (requires `AUTONOMOUS_MODE=true`). The Binance spot hedge is always manual — the bot shows the exact quantity and price.
+
+---
+
+## Alert Thresholds
+
+| Signal | Condition | Confidence |
+|---|---|---|
+| Funding extreme | `\|rate_8h\| ≥ 0.1%` | Up to 100% |
+| Funding high | `\|rate_8h\| ≥ 0.05%` | 40–70% |
+| OI confirmation | OI > $50M (same direction) | +20% |
+| Price momentum | 24h move > 3% (same direction) | +10% |
+| Low liquidity discount | UTC 16:00–22:00 (CST 00:00–06:00) | −10% |
+| Liquidation risk critical | Distance < 5% | 100% |
+| Liquidation risk high | Distance < 10% | 70% |
+| Liquidation risk medium | Distance < 20% | 40% |
+
+Only signals with **confidence ≥ 40%** are shown.
+
+---
+
+## Safety Design
+
+| Guard | Behavior |
+|---|---|
+| `AUTONOMOUS_MODE=false` | Shows trade params + directs to manual execution |
+| `MAX_POSITION_SIZE_USD` | Hard cap per trade |
+| `MAX_DAILY_LOSS_PCT` | Circuit breaker: blocks new positions after daily loss limit |
+| Private key | Lazy-loaded, never written to any file or log |
+| Liquidation alert | Fires at <20% / <10% / <5% distance, persisted in SQLite |
+| Alert deduplication | SQLite-backed, survives scheduler restarts (8h TTL funding, 4h liq, 24h news) |
 
 ---
 
@@ -150,25 +171,13 @@ HL_PRIVATE_KEY → eth_account.Account → Exchange SDK → Hyperliquid API
 
 | Task | Interval | Description |
 |---|---|---|
-| `fetch_market` | Every 5 min | HL funding rates, OI, prices + Binance snapshot |
-| `fetch_hl_account` | Every 5 min | Account positions, margin, liquidation distance |
-| `check_alerts` | Every 5 min | Scan for funding/liquidation signals → Telegram |
-| `fetch_news` | Every 15 min | BlockBeats flash news |
+| `fetch` (async) | Every 5 min | HL + Binance + FNG + news concurrent |
+| `funding_alert` | Every 5 min (+60s offset) | Scan after fresh data lands |
+| `liq_alert` | Every 5 min (+60s offset) | Liquidation risk check |
+| `news_check` | Every 15 min | BlockBeats HL-keyword filter |
 | `daily_report` | 08:00 CST | Market + account summary |
-| `weekly_report` | Monday 08:00 CST | Weekly recap |
-
----
-
-## Alert Thresholds
-
-| Signal | Condition | Level |
-|---|---|---|
-| Funding rate high | \|rate_8h\| ≥ 0.05% | ⚠️ Warning |
-| Funding rate extreme | \|rate_8h\| ≥ 0.1% | 🔴 Critical |
-| OI spike | Change ≥ ±20% | ⚠️ Warning |
-| Liquidation risk medium | Distance < 20% | ⚠️ Warning |
-| Liquidation risk high | Distance < 10% | 🔴 Critical |
-| Liquidation risk urgent | Distance < 5% | 🚨 Emergency |
+| `weekly_report` | Mon 08:00 CST | Weekly recap |
+| `db_cleanup` | Every 1 hour | Purge expired alert records |
 
 ---
 
@@ -176,18 +185,18 @@ HL_PRIVATE_KEY → eth_account.Account → Exchange SDK → Hyperliquid API
 
 ```env
 # Hyperliquid
-HL_PRIVATE_KEY=              # 0x-prefixed EVM private key — NEVER commit
-HL_WALLET_ADDRESS=           # Corresponding wallet address
-HL_USE_TESTNET=false         # true = testnet
-HL_DEFAULT_LEVERAGE=3        # Default leverage (1–50)
-HL_DEFAULT_MARGIN_MODE=cross # cross | isolated
+HL_PRIVATE_KEY=              # 0x-prefixed EVM private key
+HL_WALLET_ADDRESS=           # Wallet address
+HL_USE_TESTNET=false
+HL_DEFAULT_LEVERAGE=3
+HL_DEFAULT_MARGIN_MODE=cross
 HL_FUNDING_ALERT_THRESHOLD=0.0005
 HL_LIQ_ALERT_THRESHOLD=0.15
 
 # Telegram
 TELEGRAM_BOT_TOKEN=
 TELEGRAM_CHAT_ID=
-TELEGRAM_ALERT_CHAT_ID=      # Optional, defaults to TELEGRAM_CHAT_ID
+TELEGRAM_ALERT_CHAT_ID=      # Optional separate alert channel
 
 # News
 BLOCKBEATS_API_KEY=
@@ -198,8 +207,9 @@ NEWS_INTERVAL_MIN=15
 DAILY_REPORT_HOUR=8          # CST hour
 
 # Safety
-AUTONOMOUS_MODE=false        # true = allow auto trade execution
+AUTONOMOUS_MODE=false
 MAX_POSITION_SIZE_USD=1000
+MAX_DAILY_LOSS_PCT=5         # Circuit breaker: % of account value
 ```
 
 ---
@@ -207,23 +217,12 @@ MAX_POSITION_SIZE_USD=1000
 ## PM2 Commands
 
 ```bash
-pm2 status                          # check all processes
-pm2 logs clawie-scheduler           # live log stream
-pm2 restart clawie-scheduler        # restart scheduler
-pm2 stop clawie-scheduler           # stop scheduler
+pm2 status
+pm2 logs clawie-scheduler
+pm2 logs clawie-bot
+pm2 restart clawie-scheduler
+pm2 save                     # persist across reboots
 ```
-
----
-
-## Safety Design
-
-| Guard | Behavior |
-|---|---|
-| `AUTONOMOUS_MODE=false` | Agent explains trade params, waits for user confirmation |
-| Max position size | Hard cap per trade (default $1,000) |
-| Trade log | Every executed order saved to `memory/trade_history.json` |
-| Private key | Lazy-loaded, never logged or written to file |
-| Liquidation alert | Fires at <20% / <10% / <5% distance |
 
 ---
 
