@@ -1,10 +1,9 @@
 """
-fetcher.py — 数据抓取器
-负责从 Binance、Hyperliquid、CoinGecko 等拉取数据并缓存到 data/ 目录。
-可独立运行，也可被 scheduler.py 调用。
+fetcher.py — 异步数据抓取器
+使用 asyncio + aiohttp 并发抓取 Binance、Hyperliquid、CoinGecko、BlockBeats 数据。
 
 用法：
-  python fetcher.py          # 抓取一次全量数据
+  python fetcher.py          # 并发抓取全量数据
   python fetcher.py --task hl_market
   python fetcher.py --task hl_account
   python fetcher.py --task market_snapshot
@@ -14,22 +13,22 @@ fetcher.py — 数据抓取器
 import os
 import sys
 import json
-import time
+import asyncio
 import logging
 import argparse
 from datetime import datetime, timezone
 from pathlib import Path
 
-import requests
+import aiohttp
 from dotenv import load_dotenv
 
 load_dotenv()
 
 # ── 目录配置 ────────────────────────────────────────────────────────────────
 
-BASE_DIR   = Path(__file__).parent
-DATA_DIR   = BASE_DIR / "data"
-LOGS_DIR   = BASE_DIR / "logs"
+BASE_DIR  = Path(__file__).parent
+DATA_DIR  = BASE_DIR / "data"
+LOGS_DIR  = BASE_DIR / "logs"
 DATA_DIR.mkdir(exist_ok=True)
 LOGS_DIR.mkdir(exist_ok=True)
 
@@ -52,53 +51,71 @@ HL_API_URL      = "https://api.hyperliquid-testnet.xyz" if HL_USE_TESTNET else "
 HL_WALLET_ADDR  = os.getenv("HL_WALLET_ADDRESS", "")
 BLOCKBEATS_KEY  = os.getenv("BLOCKBEATS_API_KEY", "")
 
-BINANCE_SPOT_URL    = "https://api.binance.com/api/v3"
-BINANCE_FUTURES_URL = "https://fapi.binance.com/fapi/v1"
-FNG_URL             = "https://api.alternative.me/fng/?limit=1"
+BINANCE_SPOT_URL = "https://api.binance.com/api/v3"
+FNG_URL          = "https://api.alternative.me/fng/?limit=1"
 
 WATCHED_SYMBOLS = ["BTC", "ETH", "SOL", "BNB", "ARB", "OP", "AVAX", "DOGE", "PEPE", "WIF"]
 
+REQUEST_TIMEOUT = aiohttp.ClientTimeout(total=10)
+RETRY_DELAY     = 2  # 秒
+
 # ── 工具函数 ─────────────────────────────────────────────────────────────────
 
-def _get(url: str, params: dict = None, headers: dict = None, timeout: int = 10) -> dict | list | None:
-    try:
-        resp = requests.get(url, params=params, headers=headers, timeout=timeout)
-        resp.raise_for_status()
-        return resp.json()
-    except Exception as e:
-        log.warning(f"GET {url} failed: {e}")
-        return None
-
-
-def _post(url: str, payload: dict, timeout: int = 10) -> dict | None:
-    try:
-        resp = requests.post(url, json=payload, timeout=timeout)
-        resp.raise_for_status()
-        return resp.json()
-    except Exception as e:
-        log.warning(f"POST {url} failed: {e}")
-        return None
-
-
 def _save(filename: str, data: dict | list):
-    path = DATA_DIR / filename
-    data_with_ts = {"_updated": datetime.now(timezone.utc).isoformat(), "data": data}
+    """将数据连同时间戳保存到 data/ 目录。"""
+    path    = DATA_DIR / filename
+    wrapped = {"_updated": datetime.now(timezone.utc).isoformat(), "data": data}
     with open(path, "w") as f:
-        json.dump(data_with_ts, f, ensure_ascii=False, indent=2)
+        json.dump(wrapped, f, ensure_ascii=False, indent=2)
     log.info(f"Saved {filename} ({len(str(data))} bytes)")
 
 
-# ── Hyperliquid 数据 ──────────────────────────────────────────────────────────
+async def _get(session: aiohttp.ClientSession, url: str,
+               params: dict = None, headers: dict = None) -> dict | list | None:
+    """异步 GET，失败后重试一次。"""
+    for attempt in range(2):
+        try:
+            async with session.get(url, params=params, headers=headers,
+                                   timeout=REQUEST_TIMEOUT) as resp:
+                resp.raise_for_status()
+                return await resp.json(content_type=None)
+        except Exception as e:
+            if attempt == 0:
+                log.warning(f"GET {url} failed (attempt 1): {e}, retrying...")
+                await asyncio.sleep(RETRY_DELAY)
+            else:
+                log.warning(f"GET {url} failed (attempt 2): {e}")
+                return None
 
-def fetch_hl_market() -> dict:
+
+async def _post(session: aiohttp.ClientSession, url: str,
+                payload: dict) -> dict | None:
+    """异步 POST，失败后重试一次。"""
+    for attempt in range(2):
+        try:
+            async with session.post(url, json=payload,
+                                    timeout=REQUEST_TIMEOUT) as resp:
+                resp.raise_for_status()
+                return await resp.json(content_type=None)
+        except Exception as e:
+            if attempt == 0:
+                log.warning(f"POST {url} failed (attempt 1): {e}, retrying...")
+                await asyncio.sleep(RETRY_DELAY)
+            else:
+                log.warning(f"POST {url} failed (attempt 2): {e}")
+                return None
+
+# ── Hyperliquid 市场数据 ───────────────────────────────────────────────────────
+
+async def _fetch_hl_market_async(session: aiohttp.ClientSession) -> dict:
     """抓取 HL 全市场：价格、资金费率、未平仓量。"""
-    result = _post(f"{HL_API_URL}/info", {"type": "metaAndAssetCtxs"})
+    result = await _post(session, f"{HL_API_URL}/info", {"type": "metaAndAssetCtxs"})
     if not result or len(result) < 2:
         log.error("fetch_hl_market: empty response")
         return {}
 
     meta, ctxs = result[0], result[1]
-    universe = meta.get("universe", [])
+    universe   = meta.get("universe", [])
 
     assets = []
     for i, asset in enumerate(universe):
@@ -110,51 +127,53 @@ def fetch_hl_market() -> dict:
             oi         = float(ctx.get("openInterest", 0))
             mark_px    = float(ctx.get("markPx") or ctx.get("midPx") or 0)
             prev_day   = ctx.get("prevDayPx")
-            change_pct = ((mark_px - float(prev_day)) / float(prev_day) * 100) if prev_day and float(prev_day) else 0
-
+            change_pct = (
+                (mark_px - float(prev_day)) / float(prev_day) * 100
+                if prev_day and float(prev_day) else 0
+            )
             assets.append({
-                "symbol":          asset["name"],
-                "index":           i,
-                "sz_decimals":     asset.get("szDecimals", 3),
-                "mark_price":      mark_px,
-                "change_24h_pct":  round(change_pct, 2),
-                "funding_8h":      funding,
+                "symbol":             asset["name"],
+                "index":              i,
+                "sz_decimals":        asset.get("szDecimals", 3),
+                "mark_price":         mark_px,
+                "change_24h_pct":     round(change_pct, 2),
+                "funding_8h":         funding,
                 "funding_annualized": round(funding * 3 * 365 * 100, 2),
-                "open_interest":   oi,
+                "open_interest":      oi,
             })
         except (ValueError, TypeError):
             continue
 
-    # 资金费率极端值排序
     top_funding = sorted(assets, key=lambda x: abs(x["funding_8h"]), reverse=True)[:10]
-
     data = {"assets": assets, "top_funding": top_funding, "total_assets": len(assets)}
     _save("hl_market.json", data)
     return data
 
 
-def fetch_hl_account() -> dict:
+# ── Hyperliquid 账户数据 ───────────────────────────────────────────────────────
+
+async def _fetch_hl_account_async(session: aiohttp.ClientSession) -> dict:
     """抓取 HL 账户持仓、余额、爆仓风险。需要 HL_WALLET_ADDRESS。"""
     if not HL_WALLET_ADDR:
         log.info("fetch_hl_account: HL_WALLET_ADDRESS not set, skip")
         return {}
 
-    result = _post(f"{HL_API_URL}/info", {"type": "clearinghouseState", "user": HL_WALLET_ADDR})
+    result = await _post(session, f"{HL_API_URL}/info",
+                         {"type": "clearinghouseState", "user": HL_WALLET_ADDR})
     if not result:
         return {}
 
-    margin = result.get("marginSummary", {})
+    margin        = result.get("marginSummary", {})
     account_value = float(margin.get("accountValue", 0))
     margin_used   = float(margin.get("totalMarginUsed", 0))
     ntl_pos       = float(margin.get("totalNtlPos", 0))
 
-    positions = []
+    positions  = []
     liq_alerts = []
 
     for pos_entry in result.get("assetPositions", []):
-        p = pos_entry.get("position", {})
-        size_str = p.get("szi", "0")
-        size = float(size_str)
+        p    = pos_entry.get("position", {})
+        size = float(p.get("szi", "0"))
         if size == 0:
             continue
 
@@ -166,7 +185,6 @@ def fetch_hl_account() -> dict:
         leverage = p.get("leverage", {})
         lev_val  = leverage.get("value", 1) if isinstance(leverage, dict) else 1
 
-        # 爆仓距离
         dist_pct = 0.0
         if liq_px and entry_px:
             if side == "long":
@@ -176,31 +194,31 @@ def fetch_hl_account() -> dict:
             dist_pct = max(dist_pct, 0)
 
         pos = {
-            "symbol":      coin,
-            "side":        side,
-            "size":        abs(size),
-            "entry_price": entry_px,
-            "liq_price":   liq_px,
+            "symbol":          coin,
+            "side":            side,
+            "size":            abs(size),
+            "entry_price":     entry_px,
+            "liq_price":       liq_px,
             "dist_to_liq_pct": round(dist_pct, 2),
             "unrealized_pnl":  round(unreal, 4),
-            "leverage":    lev_val,
+            "leverage":        lev_val,
         }
         positions.append(pos)
 
         if dist_pct < 5:
             liq_alerts.append({"symbol": coin, "level": "CRITICAL", "dist_pct": dist_pct})
         elif dist_pct < 10:
-            liq_alerts.append({"symbol": coin, "level": "HIGH", "dist_pct": dist_pct})
+            liq_alerts.append({"symbol": coin, "level": "HIGH",     "dist_pct": dist_pct})
         elif dist_pct < 20:
-            liq_alerts.append({"symbol": coin, "level": "MEDIUM", "dist_pct": dist_pct})
+            liq_alerts.append({"symbol": coin, "level": "MEDIUM",   "dist_pct": dist_pct})
 
     data = {
-        "account_value_usdc": round(account_value, 2),
-        "margin_used_usdc":   round(margin_used, 2),
+        "account_value_usdc":  round(account_value, 2),
+        "margin_used_usdc":    round(margin_used, 2),
         "total_position_usdc": round(ntl_pos, 2),
-        "margin_ratio":       round(margin_used / account_value * 100, 2) if account_value else 0,
-        "positions":          positions,
-        "liq_alerts":         liq_alerts,
+        "margin_ratio":        round(margin_used / account_value * 100, 2) if account_value else 0,
+        "positions":           positions,
+        "liq_alerts":          liq_alerts,
     }
     _save("hl_account.json", data)
     return data
@@ -208,13 +226,15 @@ def fetch_hl_account() -> dict:
 
 # ── Binance + 市场快照 ────────────────────────────────────────────────────────
 
-def fetch_market_snapshot() -> dict:
-    """抓取 Binance 价格 + 恐慌贪婪指数。"""
+async def _fetch_market_snapshot_async(session: aiohttp.ClientSession) -> dict:
+    """并发抓取 Binance 价格和恐慌贪婪指数。"""
+    pairs = [s + "USDT" for s in WATCHED_SYMBOLS]
 
-    # Binance 价格
-    pairs    = [s + "USDT" for s in WATCHED_SYMBOLS]
-    ticker   = _get(f"{BINANCE_SPOT_URL}/ticker/24hr")
-    prices   = {}
+    ticker_task = _get(session, f"{BINANCE_SPOT_URL}/ticker/24hr")
+    fng_task    = _get(session, FNG_URL)
+    ticker, fng_raw = await asyncio.gather(ticker_task, fng_task)
+
+    prices = {}
     if ticker:
         for t in ticker:
             sym = t["symbol"]
@@ -226,11 +246,9 @@ def fetch_market_snapshot() -> dict:
                     "volume_usdt": float(t["quoteVolume"]),
                 }
 
-    # 恐慌贪婪
-    fng_raw = _get(FNG_URL)
     fng = {}
     if fng_raw and fng_raw.get("data"):
-        d = fng_raw["data"][0]
+        d   = fng_raw["data"][0]
         fng = {"value": int(d["value"]), "label": d["value_classification"]}
 
     data = {"prices": prices, "fear_greed": fng}
@@ -240,13 +258,14 @@ def fetch_market_snapshot() -> dict:
 
 # ── 新闻 ─────────────────────────────────────────────────────────────────────
 
-def fetch_news() -> list:
+async def _fetch_news_async(session: aiohttp.ClientSession) -> list:
     """抓取 BlockBeats 快讯。"""
     if not BLOCKBEATS_KEY:
         log.info("fetch_news: BLOCKBEATS_API_KEY not set, skip")
         return []
 
-    result = _get(
+    result = await _get(
+        session,
         "https://api.theblockbeats.news/v1/open-api/open-flash",
         params={"size": 20, "page": 1, "type": "push"},
         headers={"Authorization": BLOCKBEATS_KEY},
@@ -264,25 +283,67 @@ def fetch_news() -> list:
     return items
 
 
-# ── 主入口 ───────────────────────────────────────────────────────────────────
+# ── 并发主入口 ────────────────────────────────────────────────────────────────
 
-def fetch_all():
-    log.info("=== Full fetch starting ===")
+async def _fetch_all_async():
+    """并发抓取所有数据源。"""
+    import time
+    log.info("=== Full fetch starting (async) ===")
     t0 = time.time()
 
-    fetch_hl_market()
-    if HL_WALLET_ADDR:
-        fetch_hl_account()
-    fetch_market_snapshot()
-    fetch_news()
+    async with aiohttp.ClientSession() as session:
+        tasks = [
+            _fetch_hl_market_async(session),
+            _fetch_market_snapshot_async(session),
+            _fetch_news_async(session),
+        ]
+        if HL_WALLET_ADDR:
+            tasks.append(_fetch_hl_account_async(session))
+
+        await asyncio.gather(*tasks, return_exceptions=True)
 
     log.info(f"=== Full fetch done in {time.time() - t0:.1f}s ===")
 
 
+# ── 公共同步接口（向后兼容：scheduler.py 中 import fetcher; fetcher.fetch_all()）─
+
+def fetch_all():
+    asyncio.run(_fetch_all_async())
+
+def fetch_hl_market() -> dict:
+    async def _run():
+        async with aiohttp.ClientSession() as s:
+            return await _fetch_hl_market_async(s)
+    return asyncio.run(_run())
+
+def fetch_hl_account() -> dict:
+    async def _run():
+        async with aiohttp.ClientSession() as s:
+            return await _fetch_hl_account_async(s)
+    return asyncio.run(_run())
+
+def fetch_market_snapshot() -> dict:
+    async def _run():
+        async with aiohttp.ClientSession() as s:
+            return await _fetch_market_snapshot_async(s)
+    return asyncio.run(_run())
+
+def fetch_news() -> list:
+    async def _run():
+        async with aiohttp.ClientSession() as s:
+            return await _fetch_news_async(s)
+    return asyncio.run(_run())
+
+
+# ── CLI 入口 ─────────────────────────────────────────────────────────────────
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--task", choices=["hl_market", "hl_account", "market_snapshot", "news", "all"],
-                        default="all")
+    parser.add_argument(
+        "--task",
+        choices=["hl_market", "hl_account", "market_snapshot", "news", "all"],
+        default="all",
+    )
     args = parser.parse_args()
 
     task_map = {
