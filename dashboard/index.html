@@ -1,0 +1,750 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Clawie · Dashboard</title>
+<style>
+/* ── Reset ──────────────────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg:       #0a0c13;
+  --surface:  #0f1220;
+  --panel:    #13162480;
+  --panel-s:  #131624;
+  --border:   #1a1e32;
+  --border-2: #232840;
+  --text:     #c4cde0;
+  --text-2:   #6b7594;
+  --text-3:   #343d5c;
+  --green:    #10b981;
+  --green-bg: rgba(16,185,129,.12);
+  --red:      #f43f5e;
+  --red-bg:   rgba(244,63,94,.12);
+  --amber:    #f59e0b;
+  --amber-bg: rgba(245,158,11,.12);
+  --cyan:     #22d3ee;
+  --blue:     #818cf8;
+  --mono:     'Courier New', Consolas, monospace;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  font-size: 13px;
+  min-height: 100vh;
+  overflow-x: hidden;
+}
+
+/* ── Header ─────────────────────────────────────────────────────────── */
+.hdr {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 16px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  position: sticky;
+  top: 0;
+  z-index: 99;
+  backdrop-filter: blur(8px);
+}
+.hdr-logo { font-size: 14px; font-weight: 700; letter-spacing: -.2px; }
+.live-dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--green); box-shadow: 0 0 8px var(--green);
+  animation: blink 2.4s infinite;
+}
+@keyframes blink { 0%,100%{opacity:1} 50%{opacity:.3} }
+.live-txt { font-size: 10px; font-weight: 700; color: var(--green); letter-spacing: 1.2px; }
+.hdr-right { margin-left: auto; display: flex; align-items: center; gap: 18px; font-size: 11px; color: var(--text-2); }
+.mono { font-family: var(--mono); }
+.warn-age { color: var(--amber); }
+
+/* ── Stats ──────────────────────────────────────────────────────────── */
+.stats {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 8px;
+  padding: 10px;
+}
+.stat {
+  background: var(--panel-s);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 10px 12px;
+}
+.stat-lbl { font-size: 10px; color: var(--text-2); text-transform: uppercase; letter-spacing: .6px; margin-bottom: 5px; }
+.stat-val { font-family: var(--mono); font-size: 19px; font-weight: 700; line-height: 1.15; }
+.stat-sub { font-size: 10px; color: var(--text-2); margin-top: 3px; }
+
+/* ── Layout ─────────────────────────────────────────────────────────── */
+.main { padding: 0 10px 24px; display: flex; flex-direction: column; gap: 8px; }
+.row { display: grid; gap: 8px; }
+.row-64 { grid-template-columns: 6fr 4fr; }
+.row-55 { grid-template-columns: 1fr 1fr; }
+
+/* ── Panel ───────────────────────────────────────────────────────────── */
+.panel {
+  background: var(--panel-s);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.ph {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 7px 12px;
+  border-bottom: 1px solid var(--border);
+  background: #0f1220;
+}
+.ph-title { font-size: 10px; font-weight: 600; color: var(--text-2); text-transform: uppercase; letter-spacing: .9px; }
+.ph-meta  { font-size: 10px; color: var(--text-3); }
+
+/* ── Heatmap ─────────────────────────────────────────────────────────── */
+.heatmap {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(82px, 1fr));
+  gap: 5px;
+  padding: 10px;
+}
+.tile {
+  border-radius: 6px;
+  padding: 7px 8px 6px;
+  cursor: default;
+  transition: transform .12s, filter .12s;
+  min-height: 60px;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  border: 1px solid transparent;
+}
+.tile:hover { transform: scale(1.06); filter: brightness(1.15); }
+.tile-sym  { font-size: 11px; font-weight: 700; letter-spacing: .2px; }
+.tile-rate { font-family: var(--mono); font-size: 11px; font-weight: 600; margin-top: 4px; }
+.tile-ann  { font-size: 9px; opacity: .65; margin-top: 2px; }
+
+/* heat colours: pos = red spectrum, neg = green/teal spectrum */
+.hv+  { background:#460d0d; color:#fca5a5; border-color:#7f1d1d; }
+.hh+  { background:#3d1208; color:#fcd34d; border-color:#6e2108; }
+.hm+  { background:#1c1e2e; color:#fde68a; border-color:#2c2e48; }
+.hn   { background:#10121c; color:#343d5c; border-color:#181b2c; }
+.hm-  { background:#0b2419; color:#6ee7b7; border-color:#113a28; }
+.hh-  { background:#092d1b; color:#34d399; border-color:#0b4829; }
+.hv-  { background:#062618; color:#10b981; border-color:#074020; }
+
+/* ── Signals ─────────────────────────────────────────────────────────── */
+.sig-list { padding: 8px; display: flex; flex-direction: column; gap: 6px; max-height: 420px; overflow-y: auto; }
+.sig-card { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; }
+.sig-row  { display: flex; align-items: center; gap: 6px; margin-bottom: 3px; }
+.sig-sym  { font-family: var(--mono); font-size: 12px; font-weight: 700; }
+.sig-type { font-size: 10px; color: var(--text-2); }
+.sig-det  { font-size: 11px; color: var(--text-2); margin-bottom: 5px; line-height: 1.4; }
+.sig-adv  { font-size: 10px; color: var(--amber); margin-top: 3px; }
+.cb-wrap  { display: flex; align-items: center; gap: 6px; }
+.cb-bg    { flex: 1; height: 3px; background: var(--border-2); border-radius: 2px; overflow: hidden; }
+.cb-fill  { height: 100%; border-radius: 2px; transition: width .4s; }
+.cb-pct   { font-family: var(--mono); font-size: 10px; color: var(--text-2); min-width: 28px; text-align: right; }
+
+/* ── Table ───────────────────────────────────────────────────────────── */
+.scroll-x { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; }
+th {
+  text-align: left; font-size: 10px; font-weight: 600;
+  color: var(--text-3); text-transform: uppercase; letter-spacing: .5px;
+  padding: 6px 10px; border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+td { padding: 7px 10px; border-bottom: 1px solid var(--border); font-size: 12px; }
+tr:last-child td { border-bottom: none; }
+tr:hover td { background: rgba(255,255,255,.018); }
+.td-m { font-family: var(--mono); }
+.td-bold { font-weight: 700; }
+
+/* ── Liq distance bar ───────────────────────────────────────────────── */
+.liq-wrap { display: flex; align-items: center; gap: 5px; }
+.liq-bg   { width: 52px; height: 4px; background: var(--border-2); border-radius: 2px; overflow: hidden; }
+.liq-fill { height: 100%; border-radius: 2px; }
+
+/* ── Badge ───────────────────────────────────────────────────────────── */
+.badge { display: inline-flex; align-items: center; padding: 1px 6px; border-radius: 3px; font-size: 10px; font-weight: 600; }
+.b-long  { background: var(--green-bg); color: var(--green); }
+.b-short { background: var(--red-bg);   color: var(--red);   }
+.b-ok    { background: var(--green-bg); color: var(--green); }
+.b-warn  { background: var(--amber-bg); color: var(--amber); }
+.b-exit  { background: var(--red-bg);   color: var(--red);   }
+
+/* ── Strategy panel: two sections stacked ───────────────────────────── */
+.strat-panel { display: flex; flex-direction: column; }
+.divider { height: 1px; background: var(--border); }
+
+/* ── Chart ───────────────────────────────────────────────────────────── */
+.chart-wrap { padding: 12px 10px 8px; height: 230px; position: relative; }
+
+/* ── News ────────────────────────────────────────────────────────────── */
+.news-wrap { padding: 4px 10px 8px; max-height: 230px; overflow-y: auto; }
+.news-item { padding: 8px 0; border-bottom: 1px solid var(--border); }
+.news-item:last-child { border-bottom: none; }
+.news-time { font-size: 10px; color: var(--text-3); font-family: var(--mono); margin-bottom: 3px; }
+.news-title { font-size: 12px; font-weight: 600; line-height: 1.4; margin-bottom: 2px; }
+.news-body { font-size: 11px; color: var(--text-2); line-height: 1.4;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+
+/* ── Empty / loading ─────────────────────────────────────────────────── */
+.empty { padding: 20px 10px; text-align: center; color: var(--text-3); font-size: 11px; }
+
+/* ── Responsive ──────────────────────────────────────────────────────── */
+@media (max-width: 1100px) { .stats { grid-template-columns: repeat(3, 1fr); } }
+@media (max-width: 820px)  { .row-64,.row-55 { grid-template-columns: 1fr; } }
+@media (max-width: 560px)  { .stats { grid-template-columns: repeat(2, 1fr); } }
+</style>
+</head>
+<body>
+
+<!-- ── Header ─────────────────────────────────────────────────────────── -->
+<header class="hdr">
+  <span class="hdr-logo">🤖 Clawie</span>
+  <div class="live-dot"></div>
+  <span class="live-txt">LIVE</span>
+  <div class="hdr-right">
+    <span id="age-label"></span>
+    <span>更新于 <span id="last-updated" class="mono">——</span></span>
+    <span>刷新 <span id="countdown" class="mono" style="color:var(--cyan)">30</span>s</span>
+  </div>
+</header>
+
+<!-- ── Stats Strip ────────────────────────────────────────────────────── -->
+<div class="stats">
+  <div class="stat">
+    <div class="stat-lbl">账户净值</div>
+    <div class="stat-val" id="s-bal">—</div>
+    <div class="stat-sub" id="s-margin">—</div>
+  </div>
+  <div class="stat">
+    <div class="stat-lbl">浮动盈亏</div>
+    <div class="stat-val" id="s-unreal">—</div>
+    <div class="stat-sub" style="color:var(--text-3)">未实现</div>
+  </div>
+  <div class="stat">
+    <div class="stat-lbl">今日已实现</div>
+    <div class="stat-val" id="s-daily">—</div>
+    <div class="stat-sub" style="color:var(--text-3)">UTC 今日</div>
+  </div>
+  <div class="stat">
+    <div class="stat-lbl">持仓 / 预警</div>
+    <div class="stat-val" id="s-pos">—</div>
+    <div class="stat-sub" style="color:var(--text-3)">仓位 / 爆仓风险</div>
+  </div>
+  <div class="stat">
+    <div class="stat-lbl">每日熔断</div>
+    <div class="stat-val" id="s-circuit">—</div>
+    <div class="stat-sub" id="s-circuit-sub">—</div>
+  </div>
+  <div class="stat">
+    <div class="stat-lbl">恐慌贪婪</div>
+    <div class="stat-val" id="s-fng">—</div>
+    <div class="stat-sub" id="s-fng-lbl">—</div>
+  </div>
+</div>
+
+<!-- ── Main ───────────────────────────────────────────────────────────── -->
+<div class="main">
+
+  <!-- Row 1: Heatmap + Signals -->
+  <div class="row row-64">
+
+    <div class="panel">
+      <div class="ph">
+        <span class="ph-title">资金费率热力图</span>
+        <span class="ph-meta" id="hm-meta">加载中…</span>
+      </div>
+      <div id="heatmap" class="heatmap"></div>
+    </div>
+
+    <div class="panel">
+      <div class="ph">
+        <span class="ph-title">异动信号</span>
+        <span class="ph-meta" id="sig-count">—</span>
+      </div>
+      <div id="sig-list" class="sig-list">
+        <div class="empty">加载中…</div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- Row 2: Positions + Strategy -->
+  <div class="row row-55">
+
+    <!-- Positions -->
+    <div class="panel">
+      <div class="ph">
+        <span class="ph-title">当前持仓</span>
+        <span class="ph-meta" id="pos-meta"></span>
+      </div>
+      <div class="scroll-x">
+        <table>
+          <thead><tr>
+            <th>标的</th><th>方向</th><th>数量</th>
+            <th>入场价</th><th>浮动 PnL</th><th>爆仓距离</th><th>资金费/8h</th>
+          </tr></thead>
+          <tbody id="pos-body"><tr><td colspan="7" class="empty">加载中…</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Arb + Grid stacked -->
+    <div class="panel strat-panel">
+
+      <div class="ph">
+        <span class="ph-title">套利仓位</span>
+        <span class="ph-meta" id="arb-total" style="color:var(--green)">—</span>
+      </div>
+      <div class="scroll-x">
+        <table>
+          <thead><tr>
+            <th>标的</th><th>金额</th><th>入场→当前费率</th>
+            <th>持有</th><th>预估收益</th><th>状态</th>
+          </tr></thead>
+          <tbody id="arb-body"><tr><td colspan="6" class="empty">无套利仓位</td></tr></tbody>
+        </table>
+      </div>
+
+      <div class="divider"></div>
+
+      <div class="ph">
+        <span class="ph-title">网格交易</span>
+      </div>
+      <div class="scroll-x">
+        <table>
+          <thead><tr>
+            <th>标的</th><th>区间</th><th>格数</th><th>总资金</th><th>当前价</th><th>状态</th>
+          </tr></thead>
+          <tbody id="grid-body"><tr><td colspan="6" class="empty">无活跃网格</td></tr></tbody>
+        </table>
+      </div>
+
+    </div>
+
+  </div>
+
+  <!-- Row 3: Chart + News -->
+  <div class="row row-64">
+
+    <div class="panel">
+      <div class="ph">
+        <span class="ph-title">权益曲线</span>
+        <span class="ph-meta">近 14 天</span>
+      </div>
+      <div class="chart-wrap">
+        <canvas id="pnl-chart"></canvas>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="ph">
+        <span class="ph-title">BlockBeats 快讯</span>
+      </div>
+      <div id="news-wrap" class="news-wrap">
+        <div class="empty">加载中…</div>
+      </div>
+    </div>
+
+  </div>
+
+</div><!-- /main -->
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<script>
+'use strict';
+
+// ── Constants ─────────────────────────────────────────────────────────
+const REFRESH = 30;    // seconds
+let   tick    = REFRESH;
+let   pnlChart = null;
+
+// ── Tiny helpers ──────────────────────────────────────────────────────
+const el  = id => document.getElementById(id);
+const $   = (s, p = document) => p.querySelector(s);
+
+function usd(v, d = 2) {
+  return '$' + Math.abs(v).toLocaleString('en-US', {minimumFractionDigits: d, maximumFractionDigits: d});
+}
+
+function pnlHtml(v) {
+  const c = v >= 0 ? '#10b981' : '#f43f5e';
+  const s = v >= 0 ? '+' : '-';
+  return `<span style="color:${c};font-family:var(--mono)">${s}${usd(v)}</span>`;
+}
+
+function rateHtml(v) {
+  // v in % e.g. +0.0412
+  const abs = Math.abs(v);
+  const c   = abs >= 0.1 ? '#f43f5e'
+              : abs >= 0.05 ? '#f59e0b'
+              : v < 0 ? '#10b981'
+              : '#6b7594';
+  const s = v >= 0 ? '+' : '';
+  return `<span style="color:${c};font-family:var(--mono)">${s}${v.toFixed(4)}%</span>`;
+}
+
+function pctHtml(v, d = 2) {
+  const c = v >= 0 ? '#10b981' : '#f43f5e';
+  const s = v >= 0 ? '+' : '';
+  return `<span style="color:${c}">${s}${v.toFixed(d)}%</span>`;
+}
+
+async function get(ep) {
+  try {
+    const r = await fetch('/api' + ep);
+    return r.ok ? r.json() : null;
+  } catch { return null; }
+}
+
+// ── Summary ───────────────────────────────────────────────────────────
+function renderSummary(d) {
+  el('s-bal').innerHTML    = `<span style="color:#22d3ee">${usd(d.balance)}</span>`;
+  el('s-margin').textContent = `保证金 ${usd(d.margin_used)} (${d.margin_ratio}%)`;
+  el('s-unreal').innerHTML = pnlHtml(d.unrealized_pnl);
+  el('s-daily').innerHTML  = pnlHtml(d.daily_pnl);
+
+  const liq = d.liq_alert_count;
+  el('s-pos').innerHTML =
+    `<span style="color:#22d3ee">${d.position_count}</span>` +
+    (liq > 0 ? ` / <span style="color:#f43f5e">${liq}⚠</span>` : ' / <span style="color:var(--text-3)">0</span>');
+
+  if (d.circuit_ok) {
+    el('s-circuit').innerHTML = '<span style="color:#10b981">✅ 正常</span>';
+    el('s-circuit-sub').innerHTML = `<span style="color:var(--text-3)">阈值 ${d.circuit_threshold}%</span>`;
+  } else {
+    el('s-circuit').innerHTML = '<span style="color:#f43f5e">🔴 已熔断</span>';
+    el('s-circuit-sub').innerHTML = '<span style="color:#f43f5e">新开仓已禁止</span>';
+  }
+
+  const fng = d.fng || {};
+  if (fng.value != null) {
+    const v = fng.value;
+    const c = v < 30 ? '#f43f5e' : v < 50 ? '#f59e0b' : v < 70 ? '#c4cde0' : '#10b981';
+    el('s-fng').innerHTML     = `<span style="color:${c}">${v}</span>`;
+    el('s-fng-lbl').textContent = fng.label || '';
+  }
+
+  const age = d.data_age_s;
+  const ageEl = el('age-label');
+  if (age < 0) {
+    ageEl.textContent = '数据未就绪';
+    ageEl.className   = 'warn-age';
+  } else if (age < 360) {
+    ageEl.textContent = `数据 ${age}s 前`;
+    ageEl.className   = '';
+  } else {
+    ageEl.textContent = `⚠ 数据 ${Math.round(age/60)}m 前`;
+    ageEl.className   = 'warn-age';
+  }
+}
+
+// ── Heatmap ───────────────────────────────────────────────────────────
+function heatCls(r) {
+  if (r >  0.10) return 'hv+';
+  if (r >  0.05) return 'hh+';
+  if (r >  0.01) return 'hm+';
+  if (r < -0.10) return 'hv-';
+  if (r < -0.05) return 'hh-';
+  if (r < -0.01) return 'hm-';
+  return 'hn';
+}
+
+function renderFunding(d) {
+  el('hm-meta').textContent = `${d.total} 个资产 · Top ${d.assets.length}`;
+
+  el('heatmap').innerHTML = d.assets.map(a => {
+    const sign = a.rate >= 0 ? '+' : '';
+    const ann  = Math.abs(a.annualized);
+    const tip  =
+      `${a.symbol}\n费率: ${sign}${a.rate.toFixed(4)}%/8h\n` +
+      `年化: ~${ann.toFixed(0)}%\nOI: $${a.oi_usd_m}M\n` +
+      `价格: $${a.price.toLocaleString()}\n24h: ${a.change_24h >= 0 ? '+' : ''}${a.change_24h.toFixed(2)}%`;
+
+    return `<div class="tile ${heatCls(a.rate)}" title="${tip}">
+      <div class="tile-sym">${a.symbol}</div>
+      <div class="tile-rate">${sign}${a.rate.toFixed(4)}%</div>
+      <div class="tile-ann">~${ann >= 100 ? ann.toFixed(0) : ann.toFixed(1)}% pa</div>
+    </div>`;
+  }).join('');
+}
+
+// ── Signals ───────────────────────────────────────────────────────────
+function renderSignals(d) {
+  const sigs = d.signals || [];
+  el('sig-count').textContent = sigs.length ? `${sigs.length} 个信号` : '无信号';
+
+  if (!sigs.length) {
+    el('sig-list').innerHTML = '<div class="empty">✅ 暂无异动信号</div>';
+    return;
+  }
+
+  el('sig-list').innerHTML = sigs.map(s => {
+    const pct = Math.round(s.confidence * 100);
+    const bc  = s.confidence >= .8 ? '#f43f5e' : s.confidence >= .5 ? '#f59e0b' : '#22d3ee';
+    const adv = s.advice ? `<div class="sig-adv">💡 ${s.advice}</div>` : '';
+    return `<div class="sig-card">
+      <div class="sig-row">
+        <span>${s.emoji}</span>
+        <span class="sig-sym">${s.symbol}</span>
+        <span class="sig-type">${s.type_label}</span>
+      </div>
+      <div class="sig-det">${s.detail}</div>
+      <div class="cb-wrap">
+        <div class="cb-bg"><div class="cb-fill" style="width:${pct}%;background:${bc}"></div></div>
+        <span class="cb-pct">${pct}%</span>
+      </div>
+      ${adv}
+    </div>`;
+  }).join('');
+}
+
+// ── Positions ─────────────────────────────────────────────────────────
+function renderPositions(d) {
+  const ps = d.positions || [];
+  el('pos-meta').textContent = ps.length ? `${ps.length} 个持仓` : '';
+
+  if (!ps.length) {
+    el('pos-body').innerHTML = '<tr><td colspan="7" class="empty">当前无持仓</td></tr>';
+    return;
+  }
+
+  el('pos-body').innerHTML = ps.map(p => {
+    const dist = p.dist_to_liq_pct || 0;
+    const bc   = dist < 5 ? '#f43f5e' : dist < 15 ? '#f59e0b' : '#10b981';
+    const barW = Math.min(dist, 100);
+
+    return `<tr>
+      <td class="td-m td-bold">${p.symbol}</td>
+      <td><span class="badge b-${p.side}">${p.side === 'long' ? '做多' : '做空'}</span></td>
+      <td class="td-m">${p.size}</td>
+      <td class="td-m">${usd(p.entry_price, p.entry_price < 10 ? 4 : 2)}</td>
+      <td>${pnlHtml(p.unrealized_pnl)}</td>
+      <td>
+        <div class="liq-wrap">
+          <div class="liq-bg"><div class="liq-fill" style="width:${barW}%;background:${bc}"></div></div>
+          <span style="font-family:var(--mono);font-size:11px;color:${bc}">${dist.toFixed(1)}%</span>
+        </div>
+      </td>
+      <td>${rateHtml(p.funding_rate || 0)}</td>
+    </tr>`;
+  }).join('');
+}
+
+// ── Arb ───────────────────────────────────────────────────────────────
+function renderArb(d) {
+  const ps = d.positions || [];
+  el('arb-total').innerHTML = ps.length
+    ? `总预估 <b style="color:#10b981">+$${(d.total_est_income||0).toFixed(2)}</b>`
+    : '';
+
+  if (!ps.length) {
+    el('arb-body').innerHTML = '<tr><td colspan="6" class="empty">无套利仓位</td></tr>';
+    return;
+  }
+
+  el('arb-body').innerHTML = ps.map(p => {
+    const rates = `<span class="mono" style="font-size:11px">${p.entry_rate>=0?'+':''}${p.entry_rate.toFixed(4)}% → ${p.cur_rate>=0?'+':''}${p.cur_rate.toFixed(4)}%</span>`;
+    const stat  = p.exit_signal
+      ? '<span class="badge b-exit">🔴 平仓</span>'
+      : '<span class="badge b-ok">🟢 持有</span>';
+    return `<tr>
+      <td class="td-m td-bold">${p.symbol}</td>
+      <td class="td-m">$${p.size_usd}</td>
+      <td>${rates}</td>
+      <td class="td-m">${p.hours_held.toFixed(0)}h</td>
+      <td class="td-m" style="color:#10b981">+$${p.est_income.toFixed(2)}</td>
+      <td>${stat}</td>
+    </tr>`;
+  }).join('');
+}
+
+// ── Grid ──────────────────────────────────────────────────────────────
+function renderGrid(d) {
+  const gs = d.grids || [];
+
+  if (!gs.length) {
+    el('grid-body').innerHTML = '<tr><td colspan="6" class="empty">无活跃网格</td></tr>';
+    return;
+  }
+
+  el('grid-body').innerHTML = gs.map(g => {
+    const range = `$${g.price_low.toLocaleString()} – $${g.price_high.toLocaleString()}`;
+    const stat  = g.in_range
+      ? '<span class="badge b-ok">🟢 区间内</span>'
+      : '<span class="badge b-warn">🟡 区间外</span>';
+    return `<tr>
+      <td class="td-m td-bold">${g.symbol}</td>
+      <td style="font-size:11px">${range}</td>
+      <td class="td-m">${g.grid_count}</td>
+      <td class="td-m">$${g.total_capital.toLocaleString()}</td>
+      <td class="td-m">$${(g.current_price||0).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2})}</td>
+      <td>${stat}</td>
+    </tr>`;
+  }).join('');
+}
+
+// ── PnL Chart ─────────────────────────────────────────────────────────
+function renderChart(d) {
+  const pts    = d.points || [];
+  const labels = pts.map(p => p.date.slice(5));   // MM-DD
+  const daily  = pts.map(p => p.daily);
+  const cum    = pts.map(p => p.cumulative);
+
+  const barColors   = daily.map(v => v >= 0 ? 'rgba(16,185,129,.45)' : 'rgba(244,63,94,.45)');
+  const barBorders  = daily.map(v => v >= 0 ? '#10b981' : '#f43f5e');
+
+  if (!pnlChart) {
+    const ctx  = el('pnl-chart').getContext('2d');
+    const grad = ctx.createLinearGradient(0, 0, 0, 210);
+    grad.addColorStop(0, 'rgba(34,211,238,.22)');
+    grad.addColorStop(1, 'rgba(34,211,238,.0)');
+
+    pnlChart = new Chart(ctx, {
+      type: 'bar',
+      data: {
+        labels,
+        datasets: [
+          {
+            type: 'line',
+            label: '累计 PnL',
+            data: cum,
+            borderColor: '#22d3ee',
+            backgroundColor: grad,
+            borderWidth: 2,
+            fill: true,
+            tension: 0.35,
+            pointRadius: 2.5,
+            pointBackgroundColor: '#22d3ee',
+            yAxisID: 'y',
+            order: 1,
+          },
+          {
+            type: 'bar',
+            label: '日 PnL',
+            data: daily,
+            backgroundColor: barColors,
+            borderColor: barBorders,
+            borderWidth: 1,
+            yAxisID: 'y',
+            order: 2,
+            borderRadius: 2,
+          },
+        ],
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        interaction: { mode: 'index', intersect: false },
+        plugins: {
+          legend: {
+            labels: { color: '#6b7594', font: { size: 11 }, boxWidth: 10, padding: 14 },
+          },
+          tooltip: {
+            backgroundColor: '#13162480',
+            backdropFilter: 'blur(8px)',
+            borderColor: '#1a1e32',
+            borderWidth: 1,
+            titleColor: '#c4cde0',
+            bodyColor:  '#6b7594',
+            padding: 10,
+            callbacks: {
+              label: c => ` ${c.dataset.label}: ${c.raw >= 0 ? '+' : ''}$${(c.raw||0).toFixed(2)}`,
+            },
+          },
+        },
+        scales: {
+          x: {
+            grid:  { color: '#1a1e32' },
+            ticks: { color: '#343d5c', font: { size: 10 } },
+          },
+          y: {
+            grid:  { color: '#1a1e32' },
+            ticks: {
+              color: '#6b7594',
+              font:  { size: 10, family: 'Courier New' },
+              callback: v => '$' + v.toFixed(0),
+            },
+          },
+        },
+      },
+    });
+  } else {
+    const ds = pnlChart.data.datasets;
+    pnlChart.data.labels       = labels;
+    ds[0].data                 = cum;
+    ds[1].data                 = daily;
+    ds[1].backgroundColor      = barColors;
+    ds[1].borderColor          = barBorders;
+    pnlChart.update('none');
+  }
+}
+
+// ── News ──────────────────────────────────────────────────────────────
+function renderNews(d) {
+  const items = d.items || [];
+
+  if (!items.length) {
+    el('news-wrap').innerHTML = '<div class="empty">暂无快讯（需配置 BLOCKBEATS_API_KEY）</div>';
+    return;
+  }
+
+  el('news-wrap').innerHTML = items.map(item => {
+    let t = '——';
+    if (item.time) {
+      try {
+        t = new Date(typeof item.time === 'number' ? item.time * 1000 : item.time)
+              .toLocaleTimeString('zh-CN', {hour:'2-digit', minute:'2-digit'});
+      } catch {}
+    }
+    return `<div class="news-item">
+      <div class="news-time">${t}</div>
+      <div class="news-title">${item.title || ''}</div>
+      <div class="news-body">${item.content || ''}</div>
+    </div>`;
+  }).join('');
+}
+
+// ── Main refresh ──────────────────────────────────────────────────────
+async function refresh() {
+  const [summary, funding, positions, signals, arb, pnlData, news, grid] =
+    await Promise.all([
+      get('/summary'), get('/funding'),  get('/positions'), get('/signals'),
+      get('/arb'),     get('/pnl_history'), get('/news'),   get('/grid'),
+    ]);
+
+  if (summary)  renderSummary(summary);
+  if (funding)  renderFunding(funding);
+  if (positions)renderPositions(positions);
+  if (signals)  renderSignals(signals);
+  if (arb)      renderArb(arb);
+  if (pnlData)  renderChart(pnlData);
+  if (news)     renderNews(news);
+  if (grid)     renderGrid(grid);
+
+  el('last-updated').textContent =
+    new Date().toLocaleTimeString('zh-CN', {hour:'2-digit', minute:'2-digit', second:'2-digit'});
+
+  tick = REFRESH;
+}
+
+// ── Boot ──────────────────────────────────────────────────────────────
+document.addEventListener('DOMContentLoaded', () => {
+  refresh();
+
+  setInterval(() => {
+    tick--;
+    el('countdown').textContent = tick;
+    if (tick <= 0) refresh();
+  }, 1000);
+});
+</script>
+</body>
+</html>
