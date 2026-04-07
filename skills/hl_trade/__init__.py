@@ -147,7 +147,9 @@ class HLTradeSkill(BaseSkill):
                 f"• 方向：{'做多 📈' if side == 'long' else '做空 📉'}\n"
                 f"• 金额：`${size_usd}` USDC\n"
                 f"• 杠杆：`{lev}x`\n\n"
-                f"回复 *确认* 执行，或 /cancel 取消"
+                f"⚠️ 自动执行已关闭（`AUTONOMOUS_MODE=false`）\n"
+                f"请前往 Hyperliquid 手动下单，或在 .env 中开启自动模式。\n"
+                f"发送 /position 查看当前持仓。"
             )
 
         max_pos = float(self.getenv("MAX_POSITION_SIZE_USD", "1000"))
@@ -238,11 +240,23 @@ class HLTradeSkill(BaseSkill):
                 result = exchange.order(symbol, is_buy, sz, float(px),
                                         {"limit": {"tif": "Gtc"}}, reduce_only=True)
 
+            # 估算已实现盈亏（入场价来自缓存，无法精确，标记为估算）
+            cached = self.load("hl_account.json")
+            realized_pnl = 0.0
+            if cached:
+                for pos in cached.get("positions", []):
+                    if pos["symbol"] == symbol:
+                        realized_pnl = pos.get("unrealized_pnl", 0)
+                        break
+            self._record_trade(symbol, "close", sz, mid_px, 1, result,
+                               realized_pnl=realized_pnl)
+
             return self.ok(
                 f"✅ *平仓指令已发送*\n"
                 f"• 标的：`{symbol}`\n"
                 f"• 数量：`{sz}` {symbol}\n"
-                f"• 参考价：`${mid_px:,.2f}`",
+                f"• 参考价：`${mid_px:,.2f}`\n"
+                f"• 预估盈亏：`${realized_pnl:+.2f}`",
                 data={"order": result},
             )
 

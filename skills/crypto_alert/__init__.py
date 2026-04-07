@@ -10,7 +10,7 @@ from skills.base import BaseSkill
 def _confidence_bar(score: float, width: int = 10) -> str:
     """将 0-1 置信度转换为可视化进度条。"""
     filled = round(score * width)
-    return "█" * filled + "░" * (width - filled) + f" {score*100:.0f}%"
+    return "`" + "█" * filled + "░" * (width - filled) + f" {score*100:.0f}%`"
 
 
 def _is_low_liquidity() -> bool:

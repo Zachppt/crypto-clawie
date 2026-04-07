@@ -27,14 +27,17 @@ def init_db():
 
 def is_alerted(key: str) -> bool:
     """检查 key 是否已推送且未过期。"""
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(timezone.utc)
     with sqlite3.connect(DB_PATH) as conn:
         row = conn.execute(
             "SELECT expires_at FROM alert_log WHERE key = ?", (key,)
         ).fetchone()
     if not row:
         return False
-    return row[0] > now
+    expires = datetime.fromisoformat(row[0])
+    if expires.tzinfo is None:
+        expires = expires.replace(tzinfo=timezone.utc)
+    return expires > now
 
 
 def mark_alerted(key: str, ttl_hours: int = 8):

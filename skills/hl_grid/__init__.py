@@ -29,8 +29,11 @@ class HLGridSkill(BaseSkill):
             "status": self._grid_status,
             "cancel": self._cancel_grid,
             "pnl":    self._grid_pnl,
+            "create": lambda **kw: self._create_grid_from_args(kw.get("args", [])),
         }
-        fn = dispatch.get(action.lower(), self._grid_status)
+        fn = dispatch.get(action.lower())
+        if fn is None:
+            return self.err(f"未知操作：{action}。可用：status / cancel / pnl 或直接 /grid BTC 低价 高价 格数 每格USD")
         return fn(**kwargs)
 
     # ── 创建网格 ──────────────────────────────────────────────────────────────

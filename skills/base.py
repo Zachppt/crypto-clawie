@@ -47,7 +47,9 @@ class BaseSkill:
             if not updated:
                 return 9999.0
             ts = datetime.fromisoformat(updated)
-            delta = datetime.now(timezone.utc) - ts.replace(tzinfo=timezone.utc)
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            delta = datetime.now(timezone.utc) - ts
             return delta.total_seconds() / 60
         except Exception:
             return 9999.0

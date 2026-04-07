@@ -154,13 +154,18 @@ class FundingArbSkill(BaseSkill):
         }
         self._save_arb_positions(positions)
 
+        price = asset["mark_price"]
+        qty   = round(size_usd / price, 6)
+        action_cn = "买入" if side == "short" else "卖出"
+
         return self.ok(
             f"✅ *套利仓位已记录* — `{sym}`\n\n"
             f"• HL 方向：{'做空 perp 📉' if side == 'short' else '做多 perp 📈'}\n"
             f"• 金额：`${size_usd}` USDC\n"
             f"• 入场费率：`{rate*100:+.4f}%/8h`（年化 ~{ann:.0f}%）\n"
-            f"• 入场价格：`${asset['mark_price']:,.2f}`\n\n"
-            f"⚡ 请同步在 Binance {'买入' if side == 'short' else '卖出'}等量 {sym} 现货\n"
+            f"• 入场价格：`${price:,.2f}`\n\n"
+            f"⚡ 请同步在 Binance {action_cn} `{qty}` {sym} 现货\n"
+            f"  （约 ${size_usd:.0f} USDC @ ${price:,.2f}）\n\n"
             f"退出信号：费率 ≤ {self.EXIT_THRESHOLD*100:.3f}%/8h 时执行 /arb close {sym}"
         )
 
@@ -181,11 +186,16 @@ class FundingArbSkill(BaseSkill):
         hours_held = (datetime.now(timezone.utc).timestamp() - pos.get("opened_at", 0)) / 3600
         est_income = abs(pos["entry_funding"]) * pos["size_usd"] * (hours_held / 8)
 
+        entry_price = pos.get("entry_price", 0)
+        qty = round(pos["size_usd"] / entry_price, 6) if entry_price else "?"
+        action_cn = "卖出" if pos.get("side") == "short" else "买入"
+
         return self.ok(
             f"✅ *套利仓位已关闭* — `{sym}`\n\n"
             f"• 持有时间：`{hours_held:.0f}` 小时\n"
             f"• 预估资金费收益：`+${est_income:.2f}`\n\n"
-            f"⚡ 请同步在 Binance 平掉对冲现货仓位"
+            f"⚡ 请在 Binance {action_cn} `{qty}` {sym} 现货平掉对冲\n"
+            f"  （入场均价 ${entry_price:,.2f}）"
         )
 
     def _arb_pnl(self, **_) -> dict:

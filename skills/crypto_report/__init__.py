@@ -35,12 +35,12 @@ class CryptoReportSkill(BaseSkill):
             fng = snap.get("fear_greed", {})
             if fng:
                 emoji = "😱" if fng["value"] < 25 else "😨" if fng["value"] < 45 else "😐" if fng["value"] < 55 else "😊" if fng["value"] < 75 else "🤑"
-                lines.append(f"**市场情绪**：{emoji} {fng['value']} ({fng['label']})\n")
+                lines.append(f"*市场情绪*：{emoji} {fng['value']} ({fng['label']})\n")
 
         # 主流价格
         if snap:
             prices = snap.get("prices", {})
-            lines.append("**主流价格**")
+            lines.append("*主流价格*")
             for sym in ["BTC", "ETH", "SOL", "BNB"]:
                 if sym in prices:
                     p     = prices[sym]
@@ -52,7 +52,7 @@ class CryptoReportSkill(BaseSkill):
         if market:
             extreme = [a for a in market.get("assets", []) if abs(a["funding_8h"]) >= 0.0005]
             if extreme:
-                lines.append(f"**HL 资金费率异动** ({len(extreme)} 个标的)")
+                lines.append(f"*HL 资金费率异动* ({len(extreme)} 个标的)")
                 for a in sorted(extreme, key=lambda x: abs(x["funding_8h"]), reverse=True)[:5]:
                     rate  = a["funding_8h"]
                     emoji = "🔴" if abs(rate) >= 0.001 else "🟡"
@@ -63,7 +63,7 @@ class CryptoReportSkill(BaseSkill):
         if account:
             positions = account.get("positions", [])
             acct_val  = account.get("account_value_usdc", 0)
-            lines.append(f"**账户状态**")
+            lines.append(f"*账户状态*")
             lines.append(f"余额：${acct_val:,.2f} USDC")
             if positions:
                 total_pnl = sum(p["unrealized_pnl"] for p in positions)
@@ -87,7 +87,7 @@ class CryptoReportSkill(BaseSkill):
         lines = [
             f"📊 *每周复盘报告*",
             f"_{now.strftime('%Y-%m-%d')} (本周)_\n",
-            "**本周交易记录**",
+            "*本周交易记录*",
         ]
 
         # 读取交易历史

@@ -156,6 +156,16 @@ HELP_TEXT = """🤖 *Clawie 指令列表*
 /report — 今日报告
 /weekly — 本周复盘
 
+*套利与策略*
+/arb scan — 扫描资金费套利机会
+/arb open BTC 500 — 记录套利仓位（币种 金额USD）
+/arb status — 查看当前套利仓位
+/arb close BTC — 关闭套利记录
+/grid BTC 90000 100000 10 50 — 创建网格（低价 高价 格数 每格USD）
+/grid — 查看网格状态
+/grid cancel <grid\_id> — 取消网格
+/backtest — 运行资金费策略回测
+
 *快捷查询*
 /BTC /ETH /SOL 等任意交易对"""
 
@@ -247,8 +257,12 @@ def _route(chat_id: int, cmd: str, args: list):
     # ── 套利策略 ─────────────────────────────────────────────────────────────
     elif cmd in ("arb",):
         sub = args[0].lower() if args else "scan"
-        sym  = args[1].upper() if len(args) > 1 else None
-        size = float(args[2]) if len(args) > 2 else 100.0
+        sym = args[1].upper() if len(args) > 1 else None
+        try:
+            size = float(args[2]) if len(args) > 2 else 100.0
+        except ValueError:
+            send(chat_id, f"❌ 金额格式错误：`{args[2]}`，请输入数字，例如：`/arb open BTC 500`")
+            return
         r = skill("funding_arb").run(action=sub, symbol=sym, size_usd=size)
         send(chat_id, r["text"])
 

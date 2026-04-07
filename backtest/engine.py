@@ -47,20 +47,21 @@ class BacktestResult:
     max_drawdown:  float = 0.0
     sharpe:        float = 0.0
 
-    def summary(self) -> str:
+    def summary(self, data_label: str = "合成数据") -> str:
         if not self.trades:
-            return "📊 回测结果：无交易（检查入场阈值是否过高）"
+            return "📊 回测结果：无交易（入场阈值可能过高）"
 
-        wins = sum(1 for t in self.trades if t.pnl > 0)
+        wins        = sum(1 for t in self.trades if t.pnl > 0)
+        sharpe_note = "优秀 ✅" if self.sharpe >= 2 else "良好" if self.sharpe >= 1 else "一般 ⚠️"
         return (
-            f"📊 *回测结果*\n\n"
+            f"📊 *回测结果*（{data_label}，仅供参数验证）\n\n"
             f"• 总交易次数：{len(self.trades)}\n"
             f"• 胜率：{wins/len(self.trades)*100:.1f}%\n"
-            f"• 净 PnL：${self.total_pnl:+.2f}\n"
-            f"  └ 资金费收益：+${self.total_funding:.2f}\n"
-            f"  └ 手续费支出：-${self.total_fees:.2f}\n"
+            f"• 净 PnL：`${self.total_pnl:+.2f}`"
+            f"（资金费 +${self.total_funding:.2f} / 手续费 -${self.total_fees:.2f}）\n"
             f"• 最大回撤：{self.max_drawdown:.1f}%\n"
-            f"• 夏普比率：{self.sharpe:.2f}"
+            f"• 夏普比率：{self.sharpe:.2f}（{sharpe_note}）\n\n"
+            f"_基于合成价格模拟，结果不代表真实收益_"
         )
 
 
@@ -175,10 +176,15 @@ class BacktestEngine:
             price = tick["mark_price"]
             rate  = tick["funding_8h"]
 
-            # 累计已开仓的资金费
+            # 先累计资金费，再 snapshot，然后 on_tick 可安全删除 positions
             strategy.accrue_funding(tick)
 
-            # 获取策略动作
+            # Snapshot funding BEFORE on_tick (which may delete strategy.positions[sym])
+            funding_snapshot = {
+                s: strategy.positions[s]["funding_collected"]
+                for s in list(strategy.positions)
+            }
+
             actions = strategy.on_tick(tick)
 
             for action in actions:
@@ -192,9 +198,9 @@ class BacktestEngine:
                     }
 
                 elif action["action"] == "close" and sym in open_positions:
-                    pos       = open_positions.pop(sym)
-                    # 从 strategy.positions 中获取累计资金费（已在 accrue_funding 中更新）
-                    funding   = strategy.positions.get(sym, {}).get("funding_collected", 0)
+                    pos     = open_positions.pop(sym)
+                    # 使用 snapshot 中的资金费（on_tick 可能已删除 strategy.positions[sym]）
+                    funding = funding_snapshot.get(sym, 0)
 
                     # 价格 PnL
                     if pos["side"] == "short":
