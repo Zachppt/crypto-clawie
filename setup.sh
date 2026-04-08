@@ -98,7 +98,8 @@ DAILY_REPORT_HOUR=8             # CST 小时数
 
 # ── 安全 ─────────────────────────────────────────────────────
 AUTONOMOUS_MODE=false           # true = 允许自动执行交易（谨慎！）
-MAX_POSITION_SIZE_USD=1000      # 单笔最大仓位（USD）
+MAX_POSITION_SIZE_USD=500       # 单笔最大仓位（USD），建议从小值起步
+MAX_DAILY_LOSS_PCT=5            # 每日亏损熔断阈值（账户净值百分比）
 ENVEOF
 
   chmod 600 .env
@@ -115,9 +116,11 @@ ENVEOF
   read -p "编辑完成后按 Enter 继续..." _
 fi
 
-# ── 6. 更新 OpenClaw 配置 ─────────────────────────────────────────────────
+# ── 6. 更新 OpenClaw 配置（若已安装）────────────────────────────────────────
+# OpenClaw 是与本项目配套的 AI 分析助手，若未使用可忽略此步骤。
+# 此步骤仅更新 OpenClaw 工作目录指向，不影响 bot/scheduler 运行。
 echo ""
-echo "[6/6] 更新 OpenClaw 配置..."
+echo "[6/6] 更新 OpenClaw 配置（未安装时自动跳过）..."
 OPENCLAW_JSON="$HOME/.openclaw/openclaw.json"
 if [ -f "$OPENCLAW_JSON" ]; then
   cp "$OPENCLAW_JSON" "${OPENCLAW_JSON}.bak"

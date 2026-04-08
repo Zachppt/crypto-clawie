@@ -42,6 +42,7 @@ import importlib
 from pathlib import Path
 
 import requests
+from datetime import datetime, timezone
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -102,6 +103,7 @@ _skill_map = {
     "crypto_report": ("skills.crypto_report", "CryptoReportSkill"),
     "funding_arb":   ("skills.funding_arb",   "FundingArbSkill"),
     "hl_grid":       ("skills.hl_grid",       "HLGridSkill"),
+    "hl_trade":      ("skills.hl_trade",      "HLTradeSkill"),
 }
 
 def skill(name: str):
@@ -156,6 +158,15 @@ HELP_TEXT = """🤖 *Clawie 指令列表*
 /report — 今日报告
 /weekly — 本周复盘
 
+*交易*
+/trade open ETH long 100 — 开多（币种 方向 金额USD）
+/trade open BTC short 200 3 — 开空（含杠杆倍数）
+/trade close ETH — 平仓
+/trade cancel ETH 12345 — 撤单（需 order\_id）
+/trade leverage ETH 5 cross — 设置杠杆
+/trade — 查看当前持仓
+/override\_circuit — 临时覆盖当日亏损熔断（1小时）
+
 *套利与策略*
 /arb scan — 扫描资金费套利机会
 /arb open BTC 500 — 记录套利仓位（币种 金额USD）
@@ -167,7 +178,7 @@ HELP_TEXT = """🤖 *Clawie 指令列表*
 /backtest — 运行资金费策略回测
 
 *快捷查询*
-/BTC /ETH /SOL 等任意交易对"""
+/BTC /ETH /SOL 等任意交易对 — 价格 + 资金费率 + OI"""
 
 # ── 命令路由 ──────────────────────────────────────────────────────────────────
 
@@ -290,6 +301,57 @@ def _route(chat_id: int, cmd: str, args: list):
         except Exception as e:
             send(chat_id, f"❌ 回测失败：{e}")
 
+    # ── 交易指令 ─────────────────────────────────────────────────────────────
+    elif cmd == "trade":
+        sub = args[0].lower() if args else "positions"
+        if sub in ("open", "做多", "做空"):
+            # /trade open ETH long 100 [leverage]
+            sym     = args[1].upper() if len(args) > 1 else "ETH"
+            side    = args[2].lower() if len(args) > 2 else "long"
+            try:
+                size_usd = float(args[3]) if len(args) > 3 else 100.0
+            except ValueError:
+                send(chat_id, "❌ 格式：`/trade open <币种> <long|short> <金额USD>`")
+                return
+            lev = int(args[4]) if len(args) > 4 else None
+            r = skill("hl_trade").run(action="open", symbol=sym, side=side,
+                                      size_usd=size_usd, leverage=lev)
+        elif sub in ("close", "平仓"):
+            sym = args[1].upper() if len(args) > 1 else None
+            if not sym:
+                send(chat_id, "❌ 格式：`/trade close <币种>`")
+                return
+            r = skill("hl_trade").run(action="close", symbol=sym)
+        elif sub in ("cancel", "撤单"):
+            sym = args[1].upper() if len(args) > 1 else None
+            oid = int(args[2]) if len(args) > 2 else None
+            if not sym or not oid:
+                send(chat_id, "❌ 格式：`/trade cancel <币种> <order_id>`")
+                return
+            r = skill("hl_trade").run(action="cancel", symbol=sym, order_id=oid)
+        elif sub in ("leverage", "杠杆"):
+            sym  = args[1].upper() if len(args) > 1 else "ETH"
+            lev  = int(args[2]) if len(args) > 2 else 3
+            mode = args[3].lower() if len(args) > 3 else "cross"
+            r = skill("hl_trade").run(action="leverage", symbol=sym,
+                                      leverage=lev, margin_mode=mode)
+        else:
+            r = skill("hl_trade").run(action="positions")
+        send(chat_id, r["text"])
+
+    # ── 熔断覆盖 ─────────────────────────────────────────────────────────────
+    elif cmd == "override_circuit":
+        import json as _json
+        from datetime import timedelta
+        override_path = MEMORY_DIR / "circuit_override.json"
+        MEMORY_DIR.mkdir(exist_ok=True)
+        expires = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+        override_path.write_text(_json.dumps({"expires_at": expires}))
+        send(chat_id,
+             f"⚠️ *熔断已临时覆盖*\n"
+             f"有效期：1 小时（至 {expires[:16]} UTC）\n"
+             f"此期间新开仓不受每日亏损限制，请谨慎操作。")
+
     # ── 快捷查询任意交易对 ────────────────────────────────────────────────────
     elif cmd.upper() in known_symbols():
         r = skill("hl_monitor").run(action="funding", symbol=cmd.upper())
@@ -320,8 +382,10 @@ def register_commands():
         {"command": "weekly",   "description": "本周复盘报告"},
         {"command": "arb",      "description": "套利 — /arb scan | /arb open BTC 500 | /arb status"},
         {"command": "grid",     "description": "网格 — /grid BTC 90000 100000 10 50 | /grid status"},
-        {"command": "backtest", "description": "策略回测（合成数据快速验证）"},
-        {"command": "help",     "description": "查看所有指令"},
+        {"command": "backtest",          "description": "策略回测（合成数据快速验证）"},
+        {"command": "trade",             "description": "交易 — /trade open ETH long 100 | /trade close ETH"},
+        {"command": "override_circuit",  "description": "临时覆盖每日亏损熔断（1小时有效）"},
+        {"command": "help",              "description": "查看所有指令"},
     ]
     our_names = {c["command"] for c in our_commands}
 

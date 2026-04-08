@@ -12,6 +12,7 @@ backtest/engine.py — 策略回测引擎
   result = engine.run(FundingArbStrategy(entry_threshold=0.0005))
   print(result.summary())
 """
+from __future__ import annotations
 
 import json
 import math

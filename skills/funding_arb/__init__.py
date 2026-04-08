@@ -128,6 +128,10 @@ class FundingArbSkill(BaseSkill):
         if not symbol:
             return self.err("请指定币种，例如：/arb open BTC 500")
 
+        blocked, reason = self._check_circuit_breaker()
+        if blocked:
+            return self.err(f"🔴 *熔断触发*\n{reason}")
+
         market = self.load("hl_market.json")
         if not market:
             return self.err("市场数据未就绪")

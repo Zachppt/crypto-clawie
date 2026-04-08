@@ -82,49 +82,6 @@ class HLTradeSkill(BaseSkill):
         dec = self._get_sz_decimals(info, symbol)
         return round(size_usd / price, dec)
 
-    # ── 熔断检查 ──────────────────────────────────────────────────────────────
-
-    def _check_circuit_breaker(self) -> tuple[bool, str]:
-        """
-        检查每日亏损熔断。
-        返回 (blocked: bool, reason: str)。
-        当日亏损超过账户 MAX_DAILY_LOSS_PCT% 时禁止新开仓。
-        """
-        max_loss_pct = float(self.getenv("MAX_DAILY_LOSS_PCT", "5"))
-
-        account = self.load("hl_account.json")
-        if not account:
-            return False, ""
-        acct_val = account.get("account_value_usdc", 0)
-        if not acct_val:
-            return False, ""
-
-        history_path = self.data_dir.parent / "memory" / "trade_history.json"
-        if not history_path.exists():
-            return False, ""
-
-        today = datetime.now(timezone.utc).date().isoformat()
-        try:
-            with open(history_path) as f:
-                history = json.load(f)
-        except Exception:
-            return False, ""
-
-        today_loss = sum(
-            t.get("realized_pnl", 0)
-            for t in history
-            if t.get("timestamp", "")[:10] == today and t.get("realized_pnl", 0) < 0
-        )
-
-        loss_pct = abs(today_loss) / acct_val * 100
-        if loss_pct >= max_loss_pct:
-            return True, (
-                f"今日亏损 `${abs(today_loss):.2f}` ({loss_pct:.1f}%) "
-                f"已达熔断阈值 {max_loss_pct}%，新开仓已禁止\n"
-                f"如需强制继续，请发送 `/override_circuit`"
-            )
-        return False, ""
-
     # ── 开仓 ─────────────────────────────────────────────────────────────────
 
     def _open_position(self, symbol: str = "ETH", side: str = "long",

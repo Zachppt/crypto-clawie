@@ -81,13 +81,14 @@ class HLMonitorSkill(BaseSkill):
             price = asset["mark_price"]
             direction = "多头付空头（做多有成本）" if rate > 0 else "空头付多头（做空有成本）"
             lvl = "🔴 极端" if abs(rate) >= 0.001 else "🟡 偏高" if abs(rate) >= 0.0005 else "🟢 正常"
+            oi_usd = asset.get("open_interest", 0) * price
             text = (
-                f"💹 *{sym_upper} 资金费率*\n"
-                f"当前价格：`${price:,.2f}`\n"
-                f"8h 费率：`{rate*100:+.4f}%` {lvl}\n"
+                f"💹 *{sym_upper}*\n"
+                f"价格：`${price:,.2f}` | 24h：`{asset['change_24h_pct']:+.2f}%`\n"
+                f"资金费率(8h)：`{rate*100:+.4f}%` {lvl}\n"
                 f"方向：{direction}\n"
                 f"年化：`{ann:+.1f}%`\n"
-                f"24h 变化：`{asset['change_24h_pct']:+.2f}%`"
+                f"未平仓量：`${oi_usd/1e6:.1f}M`"
             )
             return self.ok(text, data=asset)
 

@@ -58,6 +58,10 @@ class HLGridSkill(BaseSkill):
     def _create_grid(self, symbol: str, price_low: float, price_high: float,
                      grid_count: int = 10, size_per_grid_usd: float = 50, **_) -> dict:
         """创建网格并挂限价单。"""
+        blocked, reason = self._check_circuit_breaker()
+        if blocked:
+            return self.err(f"🔴 *熔断触发*\n{reason}")
+
         if price_low >= price_high:
             return self.err("低价必须小于高价")
         if grid_count < 2:

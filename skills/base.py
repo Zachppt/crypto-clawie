@@ -2,6 +2,7 @@
 skills/base.py — 技能基类
 所有 Skill 继承此类，获得数据读取、日志、环境变量等公共能力。
 """
+from __future__ import annotations
 
 import os
 import json
@@ -73,6 +74,62 @@ class BaseSkill:
     def pending(text: str, data: dict = None) -> dict:
         """等待用户确认的操作响应，不是错误。"""
         return {"status": "pending", "success": False, "text": text, "data": data or {}}
+
+    # ── 熔断检查（所有子类共用）─────────────────────────────────────────────────
+
+    def _check_circuit_breaker(self) -> tuple:
+        """
+        检查每日亏损熔断。返回 (blocked: bool, reason: str)。
+        当日亏损超过账户 MAX_DAILY_LOSS_PCT% 时禁止新开仓。
+        若存在有效的 override 标志文件则跳过检查。
+        """
+        # 检查 override 标志（/override_circuit 命令写入）
+        override_path = self.memory_dir / "circuit_override.json"
+        if override_path.exists():
+            try:
+                with open(override_path) as f:
+                    flag = json.load(f)
+                expires = datetime.fromisoformat(flag.get("expires_at", ""))
+                if expires.tzinfo is None:
+                    expires = expires.replace(tzinfo=timezone.utc)
+                if datetime.now(timezone.utc) < expires:
+                    return False, ""   # override 有效，放行
+            except Exception:
+                pass
+
+        max_loss_pct = float(self.getenv("MAX_DAILY_LOSS_PCT", "5"))
+        account = self.load("hl_account.json")
+        if not account:
+            return False, ""
+        acct_val = account.get("account_value_usdc", 0)
+        if not acct_val:
+            return False, ""
+
+        history_path = self.memory_dir / "trade_history.json"
+        if not history_path.exists():
+            return False, ""
+
+        today = datetime.now(timezone.utc).date().isoformat()
+        try:
+            with open(history_path) as f:
+                history = json.load(f)
+        except Exception:
+            return False, ""
+
+        today_loss = sum(
+            t.get("realized_pnl", 0)
+            for t in history
+            if t.get("timestamp", "")[:10] == today and t.get("realized_pnl", 0) < 0
+        )
+
+        loss_pct = abs(today_loss) / acct_val * 100
+        if loss_pct >= max_loss_pct:
+            return True, (
+                f"今日亏损 `${abs(today_loss):.2f}` ({loss_pct:.1f}%) "
+                f"已达熔断阈值 {max_loss_pct}%，新开仓已禁止。\n"
+                f"如需强制继续，请发送 `/override_circuit`"
+            )
+        return False, ""
 
     # ── 子类必须实现 ──────────────────────────────────────────────────────────
 

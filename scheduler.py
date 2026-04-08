@@ -195,6 +195,19 @@ def job_check_news():
         log.info(f"News sent: {title[:50]}")
 
 
+# ── 任务：回测历史数据收集 ────────────────────────────────────────────────────
+
+def job_collect_backtest_data():
+    """每 8 小时追加一次 HL 市场快照到历史数据文件，用于真实数据回测。"""
+    try:
+        from backtest.data_collector import collect_snapshot
+        count = collect_snapshot()
+        if count:
+            log.info(f"Backtest snapshot collected: {count} records")
+    except Exception as e:
+        log.error(f"job_collect_backtest_data failed: {e}")
+
+
 # ── 任务：每日报告 ────────────────────────────────────────────────────────────
 
 def job_daily_report():
@@ -254,12 +267,17 @@ def main():
                                   timezone="Asia/Shanghai"),
                       id="weekly_report")
 
+    # 回测历史数据收集：每 8 小时一次
+    scheduler.add_job(job_collect_backtest_data, IntervalTrigger(hours=8),
+                      id="backtest_collect")
+
     # 每小时清理过期预警记录
     scheduler.add_job(db.clear_expired, IntervalTrigger(hours=1), id="db_cleanup")
 
-    log.info(f"  Data fetch:    every {FETCH_INTERVAL} min")
-    log.info(f"  News check:    every {NEWS_INTERVAL} min")
-    log.info(f"  Daily report:  {DAILY_REPORT_HOUR}:00 CST")
+    log.info(f"  Data fetch:      every {FETCH_INTERVAL} min")
+    log.info(f"  News check:      every {NEWS_INTERVAL} min")
+    log.info(f"  Backtest data:   every 8h")
+    log.info(f"  Daily report:    {DAILY_REPORT_HOUR}:00 CST")
     log.info("Clawie scheduler running. Press Ctrl+C to stop.")
 
     try:
