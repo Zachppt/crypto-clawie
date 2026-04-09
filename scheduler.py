@@ -51,6 +51,10 @@ BOT_TOKEN      = os.getenv("TELEGRAM_BOT_TOKEN", "")
 CHAT_ID        = os.getenv("TELEGRAM_CHAT_ID", "")
 ALERT_CHAT_ID  = os.getenv("TELEGRAM_ALERT_CHAT_ID", "") or CHAT_ID
 
+TOPIC_ALERT    = os.getenv("TELEGRAM_TOPIC_ALERT")
+TOPIC_MARKET   = os.getenv("TELEGRAM_TOPIC_MARKET")
+TOPIC_POSITION = os.getenv("TELEGRAM_TOPIC_POSITION")
+
 FETCH_INTERVAL    = int(os.getenv("FETCH_INTERVAL_MIN", "5"))
 NEWS_INTERVAL     = int(os.getenv("NEWS_INTERVAL_MIN", "15"))
 DAILY_REPORT_HOUR = int(os.getenv("DAILY_REPORT_HOUR", "8"))  # CST 小时数
@@ -60,15 +64,19 @@ LIQ_THRESHOLD     = float(os.getenv("HL_LIQ_ALERT_THRESHOLD", "0.15"))
 
 # ── Telegram 发送 ─────────────────────────────────────────────────────────────
 
-def send_telegram(msg: str, chat_id: str = None, parse_mode: str = "Markdown"):
+def send_telegram(msg: str, chat_id: str = None, parse_mode: str = "Markdown",
+                  thread_id: str = None):
     if not BOT_TOKEN or not (chat_id or CHAT_ID):
         log.warning("Telegram not configured, skip send")
         return
-    cid = chat_id or CHAT_ID
+    cid     = chat_id or CHAT_ID
+    payload = {"chat_id": cid, "text": msg, "parse_mode": parse_mode}
+    if thread_id:
+        payload["message_thread_id"] = int(thread_id)
     try:
         requests.post(
             f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-            json={"chat_id": cid, "text": msg, "parse_mode": parse_mode},
+            json=payload,
             timeout=10,
         )
     except Exception as e:
@@ -76,7 +84,7 @@ def send_telegram(msg: str, chat_id: str = None, parse_mode: str = "Markdown"):
 
 
 def send_alert(msg: str):
-    send_telegram(msg, chat_id=ALERT_CHAT_ID)
+    send_telegram(msg, chat_id=ALERT_CHAT_ID, thread_id=TOPIC_ALERT)
 
 
 # ── 数据读取 ──────────────────────────────────────────────────────────────────
@@ -191,7 +199,7 @@ def job_check_news():
             continue
 
         msg = f"📰 *快讯*\n{title}\n\n{content[:200]}{'...' if len(content) > 200 else ''}"
-        send_telegram(msg)
+        send_telegram(msg, thread_id=TOPIC_MARKET)
         log.info(f"News sent: {title[:50]}")
 
 
@@ -215,11 +223,11 @@ def job_daily_report():
         from skills.crypto_report import CryptoReportSkill
         skill  = CryptoReportSkill(DATA_DIR, BASE_DIR / "memory", {})
         report = skill.run(period="daily")
-        send_telegram(report.get("text", "⚠️ 报告生成失败"))
+        send_telegram(report.get("text", "⚠️ 报告生成失败"), thread_id=TOPIC_MARKET)
         log.info("Daily report sent")
     except Exception as e:
         log.error(f"daily_report failed: {e}")
-        send_telegram(f"⚠️ 每日报告生成失败：{e}")
+        send_telegram(f"⚠️ 每日报告生成失败：{e}", thread_id=TOPIC_MARKET)
 
 
 # ── 任务：每周报告 ────────────────────────────────────────────────────────────
@@ -229,7 +237,7 @@ def job_weekly_report():
         from skills.crypto_report import CryptoReportSkill
         skill  = CryptoReportSkill(DATA_DIR, BASE_DIR / "memory", {})
         report = skill.run(period="weekly")
-        send_telegram(report.get("text", "⚠️ 周报生成失败"))
+        send_telegram(report.get("text", "⚠️ 周报生成失败"), thread_id=TOPIC_MARKET)
         log.info("Weekly report sent")
     except Exception as e:
         log.error(f"weekly_report failed: {e}")

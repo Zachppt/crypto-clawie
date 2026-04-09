@@ -72,6 +72,11 @@ log = logging.getLogger(__name__)
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 API_URL   = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
+TOPIC_ALERT    = os.getenv("TELEGRAM_TOPIC_ALERT")
+TOPIC_MARKET   = os.getenv("TELEGRAM_TOPIC_MARKET")
+TOPIC_POSITION = os.getenv("TELEGRAM_TOPIC_POSITION")
+TOPIC_TRADE    = os.getenv("TELEGRAM_TOPIC_TRADE")
+
 env = {k: os.getenv(k, "") for k in [
     "HL_PRIVATE_KEY", "HL_WALLET_ADDRESS", "HL_USE_TESTNET",
     "HL_DEFAULT_LEVERAGE", "HL_DEFAULT_MARGIN_MODE",
@@ -81,15 +86,14 @@ env = {k: os.getenv(k, "") for k in [
 
 # ── Telegram 工具 ─────────────────────────────────────────────────────────────
 
-def send(chat_id: int, text: str, parse_mode: str = "Markdown"):
+def send(chat_id: int, text: str, parse_mode: str = "Markdown", thread_id: int = None):
     if len(text) > 4000:
         text = text[:4000] + "\n...(内容过长，已截断)"
+    payload = {"chat_id": chat_id, "text": text, "parse_mode": parse_mode}
+    if thread_id:
+        payload["message_thread_id"] = int(thread_id)
     try:
-        requests.post(f"{API_URL}/sendMessage", json={
-            "chat_id": chat_id,
-            "text": text,
-            "parse_mode": parse_mode,
-        }, timeout=10)
+        requests.post(f"{API_URL}/sendMessage", json=payload, timeout=10)
     except Exception as e:
         log.warning(f"send failed: {e}")
 
@@ -187,83 +191,88 @@ def handle(update: dict):
     if not msg:
         return
 
-    chat_id = msg["chat"]["id"]
-    text    = msg.get("text", "").strip()
+    chat_id   = msg["chat"]["id"]
+    thread_id = msg.get("message_thread_id")
+    text      = msg.get("text", "").strip()
 
     if not text.startswith("/"):
         return
 
-    parts  = text.split()
-    cmd    = parts[0].lstrip("/").split("@")[0].lower()
-    args   = parts[1:]
+    parts = text.split()
+    cmd   = parts[0].lstrip("/").split("@")[0].lower()
+    args  = parts[1:]
 
-    log.info(f"cmd=/{cmd} args={args} chat={chat_id}")
+    log.info(f"cmd=/{cmd} args={args} chat={chat_id} thread={thread_id}")
 
     try:
-        _route(chat_id, cmd, args)
+        _route(chat_id, cmd, args, thread_id=thread_id)
     except Exception as e:
         log.error(f"route error: {e}", exc_info=True)
-        send(chat_id, f"❌ 执行出错：{e}")
+        send(chat_id, f"❌ 执行出错：{e}", thread_id=thread_id)
 
 
-def _route(chat_id: int, cmd: str, args: list):
+def _route(chat_id: int, cmd: str, args: list, thread_id: int = None):
+    # 辅助：按命令类型选择目标 topic（用户在哪个 topic 发就回哪里，
+    # thread_id 为 None 时退回默认 topic）
+    def _tid(default_topic):
+        return thread_id if thread_id is not None else default_topic
 
     # ── 账户 ────────────────────────────────────────────────────────────────
     if cmd in ("position", "positions", "pos", "账户", "持仓"):
         r = skill("hl_monitor").run(action="account")
-        send(chat_id, r["text"])
+        send(chat_id, r["text"], thread_id=_tid(TOPIC_POSITION))
 
     elif cmd in ("liq", "liquidation", "risk", "爆仓"):
         r = skill("hl_monitor").run(action="liquidation")
-        send(chat_id, r["text"])
+        send(chat_id, r["text"], thread_id=_tid(TOPIC_POSITION))
 
     # ── HL 市场 ──────────────────────────────────────────────────────────────
     elif cmd == "market":
         r = skill("hl_monitor").run(action="overview")
-        send(chat_id, r["text"])
+        send(chat_id, r["text"], thread_id=_tid(TOPIC_MARKET))
 
     elif cmd == "funding":
         symbol = args[0].upper() if args else None
         r = skill("hl_monitor").run(action="funding", symbol=symbol)
-        send(chat_id, r["text"])
+        send(chat_id, r["text"], thread_id=_tid(TOPIC_MARKET))
 
     elif cmd == "oi":
         symbol = args[0].upper() if args else None
         r = skill("hl_monitor").run(action="oi", symbol=symbol)
-        send(chat_id, r["text"])
+        send(chat_id, r["text"], thread_id=_tid(TOPIC_MARKET))
 
     # ── 行情 ─────────────────────────────────────────────────────────────────
     elif cmd == "price":
         symbol = args[0].upper() if args else "BTC"
         r = skill("crypto_data").run(action="price", symbol=symbol)
-        send(chat_id, r["text"])
+        send(chat_id, r["text"], thread_id=_tid(TOPIC_MARKET))
 
     elif cmd in ("fng", "fear", "greed", "情绪"):
         r = skill("crypto_data").run(action="fng")
-        send(chat_id, r["text"])
+        send(chat_id, r["text"], thread_id=_tid(TOPIC_MARKET))
 
     # ── 快讯 ─────────────────────────────────────────────────────────────────
     elif cmd == "news":
         r = skill("crypto_news").run(action="latest")
-        send(chat_id, r["text"])
+        send(chat_id, r["text"], thread_id=_tid(TOPIC_MARKET))
 
     elif cmd == "hlnews":
         r = skill("crypto_news").run(action="hl")
-        send(chat_id, r["text"])
+        send(chat_id, r["text"], thread_id=_tid(TOPIC_MARKET))
 
     # ── 信号 ─────────────────────────────────────────────────────────────────
     elif cmd in ("alerts", "alert", "signals", "信号"):
         r = skill("crypto_alert").run(action="scan")
-        send(chat_id, r["text"])
+        send(chat_id, r["text"], thread_id=_tid(TOPIC_ALERT))
 
     # ── 报告 ─────────────────────────────────────────────────────────────────
     elif cmd in ("report", "日报"):
         r = skill("crypto_report").run(period="daily")
-        send(chat_id, r["text"])
+        send(chat_id, r["text"], thread_id=_tid(TOPIC_MARKET))
 
     elif cmd in ("weekly", "周报"):
         r = skill("crypto_report").run(period="weekly")
-        send(chat_id, r["text"])
+        send(chat_id, r["text"], thread_id=_tid(TOPIC_MARKET))
 
     # ── 套利策略 ─────────────────────────────────────────────────────────────
     elif cmd in ("arb",):
@@ -272,10 +281,11 @@ def _route(chat_id: int, cmd: str, args: list):
         try:
             size = float(args[2]) if len(args) > 2 else 100.0
         except ValueError:
-            send(chat_id, f"❌ 金额格式错误：`{args[2]}`，请输入数字，例如：`/arb open BTC 500`")
+            send(chat_id, f"❌ 金额格式错误：`{args[2]}`，请输入数字，例如：`/arb open BTC 500`",
+                 thread_id=_tid(TOPIC_TRADE))
             return
         r = skill("funding_arb").run(action=sub, symbol=sym, size_usd=size)
-        send(chat_id, r["text"])
+        send(chat_id, r["text"], thread_id=_tid(TOPIC_TRADE))
 
     # ── 网格交易 ─────────────────────────────────────────────────────────────
     elif cmd in ("grid",):
@@ -287,31 +297,31 @@ def _route(chat_id: int, cmd: str, args: list):
             r = skill("hl_grid").run(action="create", args=args)
         else:
             r = skill("hl_grid").run(action="status")
-        send(chat_id, r["text"])
+        send(chat_id, r["text"], thread_id=_tid(TOPIC_TRADE))
 
     # ── 回测 ─────────────────────────────────────────────────────────────────
     elif cmd in ("backtest", "bt"):
-        send(chat_id, "⏳ 正在运行回测（合成数据）...")
+        send(chat_id, "⏳ 正在运行回测（合成数据）...", thread_id=_tid(TOPIC_TRADE))
         try:
             from backtest.engine import BacktestEngine, FundingArbStrategy
             engine = BacktestEngine()
             engine.load_sample_data(n_periods=300)
             result = engine.run(FundingArbStrategy(entry_threshold=0.0005))
-            send(chat_id, result.summary())
+            send(chat_id, result.summary(), thread_id=_tid(TOPIC_TRADE))
         except Exception as e:
-            send(chat_id, f"❌ 回测失败：{e}")
+            send(chat_id, f"❌ 回测失败：{e}", thread_id=_tid(TOPIC_TRADE))
 
     # ── 交易指令 ─────────────────────────────────────────────────────────────
     elif cmd == "trade":
         sub = args[0].lower() if args else "positions"
         if sub in ("open", "做多", "做空"):
-            # /trade open ETH long 100 [leverage]
             sym     = args[1].upper() if len(args) > 1 else "ETH"
             side    = args[2].lower() if len(args) > 2 else "long"
             try:
                 size_usd = float(args[3]) if len(args) > 3 else 100.0
             except ValueError:
-                send(chat_id, "❌ 格式：`/trade open <币种> <long|short> <金额USD>`")
+                send(chat_id, "❌ 格式：`/trade open <币种> <long|short> <金额USD>`",
+                     thread_id=_tid(TOPIC_TRADE))
                 return
             lev = int(args[4]) if len(args) > 4 else None
             r = skill("hl_trade").run(action="open", symbol=sym, side=side,
@@ -319,14 +329,15 @@ def _route(chat_id: int, cmd: str, args: list):
         elif sub in ("close", "平仓"):
             sym = args[1].upper() if len(args) > 1 else None
             if not sym:
-                send(chat_id, "❌ 格式：`/trade close <币种>`")
+                send(chat_id, "❌ 格式：`/trade close <币种>`", thread_id=_tid(TOPIC_TRADE))
                 return
             r = skill("hl_trade").run(action="close", symbol=sym)
         elif sub in ("cancel", "撤单"):
             sym = args[1].upper() if len(args) > 1 else None
             oid = int(args[2]) if len(args) > 2 else None
             if not sym or not oid:
-                send(chat_id, "❌ 格式：`/trade cancel <币种> <order_id>`")
+                send(chat_id, "❌ 格式：`/trade cancel <币种> <order_id>`",
+                     thread_id=_tid(TOPIC_TRADE))
                 return
             r = skill("hl_trade").run(action="cancel", symbol=sym, order_id=oid)
         elif sub in ("leverage", "杠杆"):
@@ -337,7 +348,7 @@ def _route(chat_id: int, cmd: str, args: list):
                                       leverage=lev, margin_mode=mode)
         else:
             r = skill("hl_trade").run(action="positions")
-        send(chat_id, r["text"])
+        send(chat_id, r["text"], thread_id=_tid(TOPIC_TRADE))
 
     # ── 熔断覆盖 ─────────────────────────────────────────────────────────────
     elif cmd == "override_circuit":
@@ -350,19 +361,20 @@ def _route(chat_id: int, cmd: str, args: list):
         send(chat_id,
              f"⚠️ *熔断已临时覆盖*\n"
              f"有效期：1 小时（至 {expires[:16]} UTC）\n"
-             f"此期间新开仓不受每日亏损限制，请谨慎操作。")
+             f"此期间新开仓不受每日亏损限制，请谨慎操作。",
+             thread_id=_tid(TOPIC_TRADE))
 
     # ── 快捷查询任意交易对 ────────────────────────────────────────────────────
     elif cmd.upper() in known_symbols():
         r = skill("hl_monitor").run(action="funding", symbol=cmd.upper())
-        send(chat_id, r["text"])
+        send(chat_id, r["text"], thread_id=_tid(TOPIC_MARKET))
 
     # ── 帮助 ─────────────────────────────────────────────────────────────────
     elif cmd in ("start", "help", "帮助"):
-        send(chat_id, HELP_TEXT)
+        send(chat_id, HELP_TEXT, thread_id=thread_id)
 
     else:
-        send(chat_id, f"未知指令 `/{cmd}`，发送 /help 查看所有命令")
+        send(chat_id, f"未知指令 `/{cmd}`，发送 /help 查看所有命令", thread_id=thread_id)
 
 # ── 注册 Telegram 命令提示 ────────────────────────────────────────────────────
 
