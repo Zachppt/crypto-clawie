@@ -406,6 +406,191 @@ def job_auto_trade():
         log.error(f"job_auto_trade failed: {e}", exc_info=True)
 
 
+# ── 任务：Agent 智能开平仓 ────────────────────────────────────────────────────
+
+def job_agent_trade():
+    """
+    多因子 Agent 交易决策（替代简单阈值触发）。
+    评分维度：资金费率幅度 + OI 规模 + 价格动量 + 跨所费率确认
+    需要：AGENT_TRADE_ENABLED=true  AUTONOMOUS_MODE=true
+    """
+    if os.getenv("AGENT_TRADE_ENABLED", "false").lower() != "true":
+        return
+    if os.getenv("AUTONOMOUS_MODE", "false").lower() != "true":
+        log.warning("AGENT_TRADE_ENABLED=true 但 AUTONOMOUS_MODE=false，Agent 跳过")
+        return
+
+    try:
+        from skills.agent_trade import AgentTradeSkill
+        from skills.hl_trade import HLTradeSkill
+
+        trade_env = {k: os.getenv(k, "") for k in [
+            "HL_PRIVATE_KEY", "HL_WALLET_ADDRESS", "HL_USE_TESTNET",
+            "HL_DEFAULT_LEVERAGE", "HL_DEFAULT_MARGIN_MODE",
+            "MAX_POSITION_SIZE_USD", "MAX_DAILY_LOSS_PCT",
+            "AUTO_TRADE_SIZE_USD", "AUTO_TRADE_MAX_POSITIONS",
+            "HL_FUNDING_ALERT_THRESHOLD",
+        ]}
+        trade_env["AUTONOMOUS_MODE"] = "true"
+
+        agent       = AgentTradeSkill(DATA_DIR, BASE_DIR / "memory", trade_env)
+        trade_skill = HLTradeSkill(DATA_DIR, BASE_DIR / "memory", trade_env)
+
+        # 获取 Agent 决策
+        result    = agent.run(action="decide")
+        decisions = result.get("data", {}).get("decisions", [])
+
+        if not decisions:
+            log.info("job_agent_trade: 无新开仓决策")
+            return
+
+        exit_funding = float(os.getenv("AUTO_TRADE_EXIT_FUNDING", "0.0001"))
+        profit_pct   = float(os.getenv("AUTO_TRADE_PROFIT_PCT", "3"))
+        stop_pct     = float(os.getenv("AUTO_TRADE_STOP_PCT", "2"))
+
+        # ── 检查已有仓位的退出条件 ────────────────────────────────────────────
+        auto_trades_path = BASE_DIR / "memory" / "auto_trades.json"
+        auto_trades: list = []
+        if auto_trades_path.exists():
+            try:
+                with open(auto_trades_path) as f:
+                    auto_trades = json.load(f)
+            except Exception:
+                pass
+
+        market   = _load("hl_market.json")
+        mkt_map  = {a["symbol"]: a for a in (market or {}).get("assets", [])}
+        account  = _load("hl_account.json")
+        open_sym = {p["symbol"] for p in (account or {}).get("positions", [])}
+
+        remaining = []
+        for at in auto_trades:
+            sym = at["symbol"]
+            if sym not in open_sym:
+                continue  # 已平仓，清理
+            asset      = mkt_map.get(sym, {})
+            funding    = asset.get("funding_8h", 0)
+            price      = asset.get("mark_price", 0)
+            entry      = at.get("entry_price", price) or price
+            side       = at["side"]
+            pnl_pct    = ((price - entry) / entry * (1 if side == "long" else -1) * 100) if entry else 0
+
+            should_exit = False
+            reason      = ""
+            if abs(funding) < exit_funding:
+                should_exit = True
+                reason = f"费率恢复（{funding*100:.4f}%）"
+            elif pnl_pct >= profit_pct:
+                should_exit = True
+                reason = f"止盈（约+{pnl_pct:.1f}%）"
+            elif pnl_pct <= -stop_pct:
+                should_exit = True
+                reason = f"止损（约{pnl_pct:.1f}%）"
+
+            if should_exit:
+                r = trade_skill.run(action="close", symbol=sym)
+                if r.get("success"):
+                    send_alert(
+                        f"🤖 *Agent 平仓*\n"
+                        f"• 标的：`{sym}` | 原因：{reason}\n"
+                        f"• {r['text'].split(chr(10))[0]}"
+                    )
+                    log.info(f"agent_close {sym}: {reason}")
+                else:
+                    remaining.append(at)
+            else:
+                remaining.append(at)
+
+        auto_trades   = remaining
+        auto_sym_set  = {at["symbol"] for at in auto_trades}
+        max_positions = int(os.getenv("AUTO_TRADE_MAX_POSITIONS", "2"))
+
+        # ── 执行新开仓 ────────────────────────────────────────────────────────
+        for dec in decisions:
+            if len(auto_trades) >= max_positions:
+                break
+            sym = dec["symbol"]
+            if sym in open_sym or sym in auto_sym_set:
+                continue
+
+            r = trade_skill.run(
+                action="open",
+                symbol=sym,
+                side=dec["side"],
+                size_usd=dec["size_usd"],
+            )
+            if r.get("success"):
+                entry_price = mkt_map.get(sym, {}).get("mark_price", 0)
+                auto_trades.append({
+                    "symbol":        sym,
+                    "side":          dec["side"],
+                    "size_usd":      dec["size_usd"],
+                    "entry_price":   entry_price,
+                    "entry_time":    datetime.now(timezone.utc).isoformat(),
+                    "entry_funding": dec.get("funding_rate", 0),
+                    "confidence":    dec["confidence"],
+                    "reasons":       dec.get("reasons", []),
+                })
+                auto_sym_set.add(sym)
+                open_sym.add(sym)
+                send_alert(
+                    f"🤖 *Agent 开仓*\n"
+                    f"• `{sym}` {'做空 📉' if dec['side'] == 'short' else '做多 📈'} "
+                    f"`${dec['size_usd']:.0f}`\n"
+                    f"• 置信度：`{dec['confidence']*100:.0f}%`\n"
+                    f"• 依据：{' | '.join(dec.get('reasons', []))[:80]}\n"
+                    f"• 止盈 +{profit_pct}% / 止损 -{stop_pct}%"
+                )
+                log.info(f"agent_open {sym} {dec['side']} ${dec['size_usd']} conf={dec['confidence']:.2f}")
+            else:
+                log.warning(f"agent_open {sym} failed: {r['text']}")
+
+        # 持久化
+        auto_trades_path.parent.mkdir(exist_ok=True)
+        with open(auto_trades_path, "w") as f:
+            json.dump(auto_trades, f, ensure_ascii=False, indent=2)
+
+    except Exception as e:
+        log.error(f"job_agent_trade failed: {e}", exc_info=True)
+
+
+# ── 任务：链上地址监控 ─────────────────────────────────────────────────────────
+
+def job_check_onchain():
+    """扫描所有监控地址，发现新交易时推送 Telegram 告警。"""
+    try:
+        from skills.onchain import OnchainSkill
+        skill  = OnchainSkill(DATA_DIR, BASE_DIR / "memory", {})
+        result = skill.run(action="scan")
+        alerts = result.get("data", {}).get("alerts", [])
+
+        for tx in alerts:
+            chain   = tx.get("chain", "?")
+            label   = tx.get("label", "?")
+            val     = tx.get("value_display", "?")
+            direct  = tx.get("direction", "")
+            ts      = tx.get("time_display", "")
+            status  = tx.get("status", "✅")
+            tx_url  = tx.get("tx_url", "")
+            addr    = tx.get("address", "")[:12]
+
+            alert_key = f"onchain:{tx.get('hash', '')[:20]}"
+            if not db.is_alerted(alert_key):
+                msg = (
+                    f"⛓️ *链上异动* — {chain} `{label}`\n"
+                    f"{status} {ts} {direct} `{val}`\n"
+                    f"地址：`{addr}...`\n"
+                )
+                if tx_url:
+                    msg += f"🔗 {tx_url}"
+                send_alert(msg)
+                db.mark_alerted(alert_key, ttl_hours=24)
+                log.info(f"onchain alert: {chain} {label} {val}")
+
+    except Exception as e:
+        log.error(f"job_check_onchain failed: {e}", exc_info=True)
+
+
 # ── 任务：每日报告 ────────────────────────────────────────────────────────────
 
 def job_daily_report():
@@ -472,17 +657,32 @@ def main():
     # 每小时清理过期预警记录
     scheduler.add_job(db.clear_expired, IntervalTrigger(hours=1), id="db_cleanup")
 
-    # 自动交易：在 fetch + 预警 后 90s 启动，使用最新信号
-    auto_trade_enabled = os.getenv("AUTO_TRADE_ENABLED", "false").lower() == "true"
-    if auto_trade_enabled:
-        auto_start = datetime.now(timezone.utc) + timedelta(seconds=90)
+    # 自动交易（简单阈值）：在 fetch + 预警 后 90s 启动
+    auto_trade_enabled  = os.getenv("AUTO_TRADE_ENABLED", "false").lower() == "true"
+    agent_trade_enabled = os.getenv("AGENT_TRADE_ENABLED", "false").lower() == "true"
+    signal_start        = datetime.now(timezone.utc) + timedelta(seconds=90)
+
+    if agent_trade_enabled:
+        scheduler.add_job(job_agent_trade, IntervalTrigger(minutes=FETCH_INTERVAL),
+                          id="agent_trade", next_run_time=signal_start)
+        log.info(f"  Agent-trade:     ENABLED (multi-factor, every {FETCH_INTERVAL} min)")
+    elif auto_trade_enabled:
         scheduler.add_job(job_auto_trade, IntervalTrigger(minutes=FETCH_INTERVAL),
-                          id="auto_trade", next_run_time=auto_start)
-        log.info(f"  Auto-trade:      ENABLED (every {FETCH_INTERVAL} min, confidence≥"
-                 f"{os.getenv('AUTO_TRADE_MIN_CONFIDENCE', '0.7')}, "
-                 f"size=${os.getenv('AUTO_TRADE_SIZE_USD', '50')})")
+                          id="auto_trade", next_run_time=signal_start)
+        log.info(f"  Auto-trade:      ENABLED (threshold, every {FETCH_INTERVAL} min)")
     else:
-        log.info("  Auto-trade:      disabled (set AUTO_TRADE_ENABLED=true to enable)")
+        log.info("  Auto/Agent-trade: disabled")
+
+    # 链上监控
+    onchain_interval = int(os.getenv("ONCHAIN_INTERVAL_MIN", str(FETCH_INTERVAL)))
+    watchlist_path   = BASE_DIR / "memory" / "watchlist.json"
+    if watchlist_path.exists():
+        onchain_start = datetime.now(timezone.utc) + timedelta(seconds=120)
+        scheduler.add_job(job_check_onchain, IntervalTrigger(minutes=onchain_interval),
+                          id="onchain_check", next_run_time=onchain_start)
+        log.info(f"  Onchain monitor: ENABLED (every {onchain_interval} min)")
+    else:
+        log.info("  Onchain monitor: no watchlist yet (use /watch add to start)")
 
     log.info(f"  Data fetch:      every {FETCH_INTERVAL} min")
     log.info(f"  News check:      every {NEWS_INTERVAL} min")

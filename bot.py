@@ -139,6 +139,9 @@ _skill_map = {
     "funding_arb":   ("skills.funding_arb",   "FundingArbSkill"),
     "hl_grid":       ("skills.hl_grid",       "HLGridSkill"),
     "hl_trade":      ("skills.hl_trade",      "HLTradeSkill"),
+    "exchange_agg":  ("skills.exchange_agg",  "ExchangeAggSkill"),
+    "onchain":       ("skills.onchain",       "OnchainSkill"),
+    "agent_trade":   ("skills.agent_trade",   "AgentTradeSkill"),
 }
 
 def skill(name: str, override_env: dict = None):
@@ -248,6 +251,24 @@ HELP_TEXT = r"""🤖 *Clawie 指令列表*
 /autotrade — 查看自动交易状态
 /autotrade on — 启用自动交易
 /autotrade off — 关闭自动交易
+
+*多交易所聚合*
+/compare BTC — 跨所价格对比（Binance/OKX/Bybit/Gate/HL）
+/exfunding BTC — 跨所资金费率对比
+/vol BTC — 跨所成交量对比
+/divergence — 扫描主流币跨所价差
+
+*Agent 智能交易*
+/agent scan — 全市场多因子分析
+/agent status — Agent 状态与近期决策
+/agent history — 历史决策记录
+
+*链上监控*
+/watch add ETH 0x1234... 标签 — 添加地址监控
+/watch list — 查看监控列表
+/watch ETH 0x1234... — 查地址近期交易
+/watch remove ETH 0x1234... — 移除监控
+/chains — 链上监控概览
 
 *系统*
 /status — Bot 运行状态一览
@@ -574,6 +595,92 @@ def _route(chat_id: int, cmd: str, args: list, thread_id: int = None):
         r = skill("hl_monitor").run(action="funding", symbol=cmd.upper())
         send(chat_id, r["text"], thread_id=_tid(TOPIC_MARKET))
 
+    # ── 多交易所聚合查询 ──────────────────────────────────────────────────────
+    elif cmd in ("compare", "cmp", "对比"):
+        sym = args[0].upper() if args else "BTC"
+        r   = skill("exchange_agg").run(action="compare", symbol=sym)
+        send(chat_id, r["text"], thread_id=_tid(TOPIC_MARKET))
+
+    elif cmd in ("exfunding", "xfunding", "跨所费率"):
+        sym = args[0].upper() if args else "BTC"
+        r   = skill("exchange_agg").run(action="funding", symbol=sym)
+        send(chat_id, r["text"], thread_id=_tid(TOPIC_MARKET))
+
+    elif cmd in ("vol", "volume", "成交量"):
+        sym = args[0].upper() if args else "BTC"
+        r   = skill("exchange_agg").run(action="volume", symbol=sym)
+        send(chat_id, r["text"], thread_id=_tid(TOPIC_MARKET))
+
+    elif cmd in ("divergence", "div", "价差"):
+        r = skill("exchange_agg").run(action="divergence")
+        send(chat_id, r["text"], thread_id=_tid(TOPIC_MARKET))
+
+    # ── Agent 智能交易 ────────────────────────────────────────────────────────
+    elif cmd == "agent":
+        sub = args[0].lower() if args else "status"
+        if sub in ("scan", "analyze", "分析"):
+            send(chat_id, "🤖 Agent 正在分析市场...", thread_id=_tid(TOPIC_TRADE))
+            r = skill("agent_trade").run(action="analyze")
+        elif sub in ("status", "状态"):
+            r = skill("agent_trade").run(action="status")
+        elif sub in ("history", "历史"):
+            r = skill("agent_trade").run(action="history")
+        elif sub in ("decide", "决策"):
+            send(chat_id, "🤖 Agent 正在生成决策...", thread_id=_tid(TOPIC_TRADE))
+            r = skill("agent_trade").run(action="decide")
+        else:
+            r = skill("agent_trade").run(action="status")
+        send(chat_id, r["text"], thread_id=_tid(TOPIC_TRADE))
+
+    # ── 链上监控 ─────────────────────────────────────────────────────────────
+    elif cmd in ("watch", "链上", "onchain"):
+        sub = args[0].lower() if args else "list"
+
+        if sub == "add":
+            # /watch add ETH 0x... [标签] [阈值]
+            chain   = args[1].upper() if len(args) > 1 else "ETH"
+            address = args[2] if len(args) > 2 else None
+            label   = args[3] if len(args) > 3 else None
+            try:
+                threshold = float(args[4]) if len(args) > 4 else None
+            except ValueError:
+                threshold = None
+            r = skill("onchain").run(action="add", chain=chain, address=address,
+                                     label=label, alert_threshold=threshold)
+
+        elif sub == "remove":
+            chain   = args[1].upper() if len(args) > 1 else "ETH"
+            address = args[2] if len(args) > 2 else None
+            r = skill("onchain").run(action="remove", chain=chain, address=address)
+
+        elif sub == "list":
+            r = skill("onchain").run(action="list")
+
+        elif sub == "scan":
+            send(chat_id, "⏳ 扫描链上活动...", thread_id=_tid(TOPIC_ALERT))
+            r = skill("onchain").run(action="scan")
+
+        elif sub in ("chains", "overview"):
+            r = skill("onchain").run(action="chains")
+
+        elif sub.upper() in ("ETH", "BNB", "SOL"):
+            # /watch ETH 0x... 直接查询
+            chain   = sub.upper()
+            address = args[1] if len(args) > 1 else None
+            r = skill("onchain").run(action="recent", chain=chain, address=address)
+
+        else:
+            # /watch <address> — 尝试猜测链（SOL 地址较短无0x前缀）
+            address = sub
+            chain   = "SOL" if not address.startswith("0x") else "ETH"
+            r = skill("onchain").run(action="recent", chain=chain, address=address)
+
+        send(chat_id, r["text"], thread_id=_tid(TOPIC_ALERT))
+
+    elif cmd == "chains":
+        r = skill("onchain").run(action="chains")
+        send(chat_id, r["text"], thread_id=_tid(TOPIC_ALERT))
+
     # ── 自动交易管理 ──────────────────────────────────────────────────────────
     elif cmd == "autotrade":
         sub = args[0].lower() if args else "status"
@@ -729,6 +836,13 @@ def register_commands():
         {"command": "backtest",          "description": "策略回测（合成数据快速验证）"},
         {"command": "trade",             "description": "交易 — /trade open ETH long 100 | /trade close ETH"},
         {"command": "override_circuit",  "description": "临时覆盖每日亏损熔断（1小时有效）"},
+        {"command": "compare",   "description": "跨所价格对比 — /compare BTC"},
+        {"command": "exfunding", "description": "跨所资金费率对比 — /exfunding BTC"},
+        {"command": "vol",       "description": "跨所成交量对比 — /vol BTC"},
+        {"command": "divergence","description": "跨所价差扫描"},
+        {"command": "agent",     "description": "Agent 分析 — /agent scan | status | history"},
+        {"command": "watch",     "description": "链上监控 — /watch add ETH 0x... | list | remove"},
+        {"command": "chains",    "description": "链上监控概览"},
         {"command": "autotrade",         "description": "自动交易状态 / on / off"},
         {"command": "status",            "description": "Bot 运行状态一览"},
         {"command": "help",              "description": "查看所有指令"},
