@@ -181,84 +181,103 @@ def skill(name: str, override_env: dict = None):
 
 # ── 已知交易对 ────────────────────────────────────────────────────────────────
 
+# 常用主流币种静态列表（快捷符号 /BTC /ETH 等无需 HL 也能识别）
+_COMMON_SYMBOLS = {
+    "BTC","ETH","SOL","BNB","XRP","DOGE","AVAX","ARB","OP","PEPE",
+    "MATIC","LINK","ADA","DOT","LTC","BCH","ATOM","UNI","AAVE","CRV",
+    "SUI","APT","INJ","TIA","SEI","WLD","JTO","PYTH","JUP","BONK","WIF",
+    "NEAR","FTM","GMX","BLUR","COMP","MKR","SNX","LDO","RPL","ENS",
+    "RNDR","FET","MEME","ORDI","PIXEL","STRK","DYM","ALT","ZRO","TON",
+}
+
 _symbols_cache: set = set()
 
 def known_symbols() -> set:
+    """返回已知可交易符号集合。优先读 HL 缓存扩充，无缓存时用内置静态列表。"""
     global _symbols_cache
     path = DATA_DIR / "hl_market.json"
-    if not path.exists():
-        return _symbols_cache
-    try:
-        with open(path) as f:
-            raw = json.load(f)
-        data = raw.get("data") if "data" in raw else raw
-        _symbols_cache = {a["symbol"] for a in data.get("assets", [])}
-    except Exception:
-        pass
-    return _symbols_cache
+    if path.exists():
+        try:
+            with open(path) as f:
+                raw = json.load(f)
+            data = raw.get("data") if "data" in raw else raw
+            hl_syms = {a["symbol"] for a in data.get("assets", [])}
+            if hl_syms:
+                _symbols_cache = hl_syms | _COMMON_SYMBOLS
+                return _symbols_cache
+        except Exception:
+            pass
+    return _COMMON_SYMBOLS
 
 # ── 帮助 & 引导文本 ───────────────────────────────────────────────────────────
 
 ONBOARD_TEXT = r"""👋 *欢迎使用 Clawie！*
 
-我是你的加密货币交易 + 行情助手，包含两部分：
-• *AK Bot*（我）— 命令驱动，实时跨所数据、下单、报告
+我是你的通用加密货币行情 + 交易助手，包含两部分：
+• *AK Bot*（我）— 命令驱动，跨所实时数据、下单、报告
 • *AI Agent*（群里的 @DigentZach）— 智能分析，@他 可以问任何问题
 
-数据来源：Binance / OKX / Bybit / Hyperliquid（跨所聚合）
+数据来源：Binance / OKX / Bybit / Gate.io / Hyperliquid（聚合）
+WebSocket 实时价格 | ccxt 统一接口 | 无需任何 API Key 即可使用行情功能
 
 ─────────────────────────
-*Step 1 — 先看市场*
+*Step 1 — 看市场（无需配置）*
 
-/market — 跨所行情 + 恐慌贪婪 + HL 账户摘要
-/funding BTC — 跨所资金费率对比（含套利机会提示）
-/alerts — 多因子异动信号扫描
+/market — 主流币跨所实时行情 + 恐慌贪婪指数
+/funding BTC — Binance / OKX / Bybit / HL 资金费率对比
+/alerts — 全市场多因子异动信号扫描
 /ta BTC 1h — BTC 1h 技术分析（RSI / MA / BB / MACD）
 
 ─────────────────────────
-*Step 2 — 查看账户*
+*Step 2 — 深度分析（无需配置）*
+
+/compare BTC — 六大交易所价格对比 + 套利机会
+/mm BTC — 跨所做市商阶段分析（积累/洗盘/拉升/派发）
+/divergence — 扫描主流币价差异动
+/deep BTC — AI Agent 深度分析（MM 阶段 + 跨所费率 + 技术面）
+
+─────────────────────────
+*Step 3 — 查持仓（需配置 API Key）*
 
 /position — 我的持仓和余额
-/liq — 爆仓风险评估
+/position binance — 指定查询 Binance 持仓
+/liq — 爆仓风险评估（Hyperliquid）
+
+在 .env 中填写对应交易所的 API Key 即可使用：
+`TRADING_EXCHANGE=binance`（或 okx / bybit / hyperliquid）
 
 ─────────────────────────
-*Step 3 — 跨所深度分析*
+*Step 4 — 交易（需配置 API Key）*
 
-/compare ETH — 跨所价格对比（Binance / OKX / Bybit / Gate / HL）
-/mm BTC — BTC 跨所做市商综合分析（阶段识别 + OI 分布）
-/divergence — 主流币价差异动扫描
-
-─────────────────────────
-*Step 4 — 交易*
-
-`/trade open ETH long 100` — 做多 ETH $100
+`/trade open ETH long 100` — 做多 ETH $100（默认交易所）
+`/trade open BTC short 200 binance` — 在 Binance 做空 BTC
 `/trade close ETH` — 平仓 ETH
-最后加 `binance` / `okx` / `bybit` 可在指定交易所执行
-⚠️ 首次使用建议先设置 `HL_USE_TESTNET=true`
+支持：Binance / OKX / Bybit / Hyperliquid
 
 ─────────────────────────
-*Step 5 — AI 深度分析*
+*Step 5 — AI 分析（随时可用）*
 
 /ask 现在做多 SOL 合适吗？ — 整理市场数据供 AI Agent 分析
-/deep BTC — 整理 BTC 深度数据（MM 阶段 + 跨所费率）
-/advice — 分析当前持仓，让 AI Agent 给出操作建议
-/track SOL 15 — 每 15 分钟追踪 SOL，/track report 立即生成
+/advice — 把当前持仓发给 AI Agent，获取操作建议
+/track SOL 15 — 每 15 分钟追踪 SOL，自动推送 AI 报告
 
 ─────────────────────────
-/status — Bot 运行状态
-/help — 完整指令列表（所有命令）"""
+/status — 查看交易所配置状态
+/help — 完整指令列表"""
 
 HELP_TEXT = r"""🤖 *Clawie 指令列表*
 
-*账户（HL）*
-/position — 持仓明细和余额
-/liq — 爆仓风险评估
+*账户与持仓（需对应交易所 API Key）*
+/position — 当前交易所持仓和余额（读 TRADING\_EXCHANGE）
+/position binance — 指定查 Binance 持仓
+/position okx — 指定查 OKX 持仓
+/liq — 爆仓风险评估（仅 Hyperliquid）
 
-*市场（跨所：Binance / OKX / Bybit / HL）*
-/market — 跨所行情 + 恐慌贪婪 + HL 账户摘要
-/funding BTC — 跨所资金费率对比 + 套利机会
-/oi — HL 未平仓量排行
-/oi BTC — 指定币种 OI
+*市场行情（无需配置，跨所实时）*
+/market — 主流币跨所价格 + 恐慌贪婪指数
+/funding BTC — Binance/OKX/Bybit/HL 资金费率对比
+/oi — 未平仓量排行（HL 全市场）
+/oi BTC — 指定币种跨所 OI 分布
 
 *行情*
 /price — 实时价格（WebSocket/Binance 优先）
@@ -544,37 +563,38 @@ def _route(chat_id: int, cmd: str, args: list, thread_id: int = None):
     def _tid(default_topic):
         return thread_id if thread_id is not None else default_topic
 
-    # ── 账户 ────────────────────────────────────────────────────────────────
+    # ── 账户 ─────────────────────────────────────────────────────────────────
+    # /position              → 读 TRADING_EXCHANGE 环境变量（默认 hyperliquid）
+    # /position binance      → 指定交易所
     if cmd in ("position", "positions", "pos", "账户", "持仓"):
-        r = skill("hl_monitor").run(action="account")
+        _known_ex = {"binance", "okx", "bybit", "hl", "hyperliquid"}
+        ex = args[0].lower() if args and args[0].lower() in _known_ex else None
+        if not ex:
+            ex = os.getenv("TRADING_EXCHANGE", "hyperliquid").lower()
+        ex = "hyperliquid" if ex == "hl" else ex
+
+        if ex == "hyperliquid":
+            r = skill("hl_monitor").run(action="account")
+        else:
+            r = skill("exchange_trade").run(action="positions", exchange=ex)
         send(chat_id, r["text"], thread_id=_tid(TOPIC_POSITION))
 
+    # /liq — 爆仓风险（当前仅 Hyperliquid 支持详细爆仓价计算）
     elif cmd in ("liq", "liquidation", "risk", "爆仓"):
-        r = skill("hl_monitor").run(action="liquidation")
-        send(chat_id, r["text"], thread_id=_tid(TOPIC_POSITION))
+        ex = os.getenv("TRADING_EXCHANGE", "hyperliquid").lower()
+        if ex == "hyperliquid":
+            r = skill("hl_monitor").run(action="liquidation")
+            send(chat_id, r["text"], thread_id=_tid(TOPIC_POSITION))
+        else:
+            send(chat_id,
+                 f"⚠️ 爆仓风险评估当前仅支持 Hyperliquid。\n"
+                 f"你的 `TRADING_EXCHANGE={ex}`，请改为 `hyperliquid` 或手动在交易所查询爆仓价。",
+                 thread_id=_tid(TOPIC_POSITION))
 
-    # ── 市场总览（跨所价格 + FNG + HL 账户摘要）────────────────────────────
+    # ── 市场总览（纯跨所：Binance/WS 实时价格 + FNG）────────────────────────
     elif cmd == "market":
-        # 1. 跨所行情（Binance/WS 实时价格 + FNG）
-        r_mkt = skill("crypto_data").run(action="overview")
-        # 2. HL 账户摘要（仅当有私钥时）
-        r_acc = skill("hl_monitor").run(action="account")
-        combined = r_mkt["text"]
-        # 追加账户摘要（提取简短版）
-        if r_acc.get("success") and r_acc.get("data"):
-            d = r_acc["data"]
-            acct_val   = d.get("account_value_usdc", 0)
-            positions  = d.get("positions", [])
-            pos_count  = len(positions)
-            pnl        = sum(p.get("unrealized_pnl", 0) for p in positions)
-            liq_alerts = d.get("liq_alerts", [])
-            liq_note   = f" | ⚠️ 爆仓预警 {len(liq_alerts)} 个" if liq_alerts else ""
-            combined += (
-                f"\n\n*HL 账户*\n"
-                f"账户价值：`${acct_val:,.2f}` | 持仓：`{pos_count}` 个"
-                f" | 浮盈：`{pnl:+,.2f}`{liq_note}"
-            )
-        send(chat_id, combined, thread_id=_tid(TOPIC_MARKET))
+        r = skill("crypto_data").run(action="overview")
+        send(chat_id, r["text"], thread_id=_tid(TOPIC_MARKET))
 
     elif cmd == "funding":
         # 跨所资金费率（Binance+OKX+Bybit+HL），无 symbol 默认 BTC
@@ -584,7 +604,13 @@ def _route(chat_id: int, cmd: str, args: list, thread_id: int = None):
 
     elif cmd == "oi":
         symbol = args[0].upper() if args else None
-        r = skill("hl_monitor").run(action="oi", symbol=symbol)
+        if symbol:
+            # 指定币种：跨所 OI 分布（Binance + OKX + Bybit + HL）
+            send(chat_id, f"⏳ 正在抓取 {symbol} 跨所 OI 数据...", thread_id=_tid(TOPIC_MARKET))
+            r = skill("mm_analysis").run(action="cross", symbol=symbol)
+        else:
+            # 全市场排行：HL 缓存最全，速度最快
+            r = skill("hl_monitor").run(action="oi")
         send(chat_id, r["text"], thread_id=_tid(TOPIC_MARKET))
 
     # ── 行情 ─────────────────────────────────────────────────────────────────
@@ -1222,27 +1248,35 @@ def _route(chat_id: int, cmd: str, args: list, thread_id: int = None):
 
     # ── 系统状态 ──────────────────────────────────────────────────────────────
     elif cmd in ("status", "健康", "状态"):
-        has_key    = bool(os.getenv("HL_PRIVATE_KEY"))
-        has_wallet = bool(os.getenv("HL_WALLET_ADDRESS"))
+        trading_ex = os.getenv("TRADING_EXCHANGE", "未配置（默认 hyperliquid）")
         autonomous = os.getenv("AUTONOMOUS_MODE", "false").lower() == "true"
         auto_trade = os.getenv("AUTO_TRADE_ENABLED", "false").lower() == "true"
-        testnet    = os.getenv("HL_USE_TESTNET", "false").lower() == "true"
+
+        # 各交易所 API key 状态
+        has_hl     = bool(os.getenv("HL_PRIVATE_KEY")) and bool(os.getenv("HL_WALLET_ADDRESS"))
+        has_bn     = bool(os.getenv("BINANCE_API_KEY"))
+        has_okx    = bool(os.getenv("OKX_API_KEY"))
+        has_bybit  = bool(os.getenv("BYBIT_API_KEY"))
 
         # 数据新鲜度
         from skills.base import BaseSkill
-        _bs = BaseSkill(DATA_DIR, MEMORY_DIR, env)
-        mkt_age = _bs.data_age_minutes("hl_market.json")
-        acc_age = _bs.data_age_minutes("hl_account.json")
-        ws_age  = _bs.data_age_minutes("ws_prices.json") * 60  # 转秒
-
-        if mkt_age < 6:
-            data_status = f"✅ 正常（{mkt_age:.0f} 分钟前）"
-        elif mkt_age < 30:
-            data_status = f"⚠️ 偏旧（{mkt_age:.0f} 分钟前）"
-        else:
-            data_status = f"❌ 过期（{mkt_age:.0f} 分钟前，调度器可能未运行）"
+        _bs    = BaseSkill(DATA_DIR, MEMORY_DIR, env)
+        ws_age = _bs.data_age_minutes("ws_prices.json") * 60  # 转秒
 
         ws_status = f"⚡ 在线（{ws_age:.0f}s 前）" if ws_age <= 10 else "⏸️ 未运行（可选）"
+
+        # HL 数据缓存（仅当配置了 HL 时显示）
+        hl_data_line = ""
+        if has_hl:
+            mkt_age = _bs.data_age_minutes("hl_market.json")
+            acc_age = _bs.data_age_minutes("hl_account.json")
+            if mkt_age < 6:
+                mkt_s = f"✅ {mkt_age:.0f}min 前"
+            elif mkt_age < 30:
+                mkt_s = f"⚠️ {mkt_age:.0f}min 前（偏旧）"
+            else:
+                mkt_s = f"❌ {mkt_age:.0f}min 前（调度器可能未运行）"
+            hl_data_line = f"\nHL 市场缓存：{mkt_s}\nHL 账户缓存：{acc_age:.0f}min 前"
 
         # 自动交易仓位
         auto_trades_path = MEMORY_DIR / "auto_trades.json"
@@ -1256,22 +1290,21 @@ def _route(chat_id: int, cmd: str, args: list, thread_id: int = None):
 
         lines = [
             "📊 *系统状态*\n",
-            "*配置*",
-            f"{'✅' if has_key    else '❌'} HL 私钥",
-            f"{'✅' if has_wallet else '❌'} 钱包地址",
-            f"{'🧪' if testnet    else '🌐'} 网络：{'测试网' if testnet else '主网'}",
-            f"{'✅' if autonomous else '⚠️'} 自主模式（手动交易确认）：{'开启' if autonomous else '关闭'}",
+            "*交易所配置*",
+            f"{'✅' if has_hl    else '⚪'} Hyperliquid（私钥 + 钱包）",
+            f"{'✅' if has_bn    else '⚪'} Binance（API Key）",
+            f"{'✅' if has_okx   else '⚪'} OKX（API Key）",
+            f"{'✅' if has_bybit else '⚪'} Bybit（API Key）",
+            f"\n当前交易所：`{trading_ex}`",
+            f"{'✅' if autonomous else '⚠️'} 自主模式（AUTONOMOUS_MODE）：{'开启' if autonomous else '关闭'}",
             f"{'✅' if auto_trade else '⏸️'} 自动交易：{'开启' if auto_trade else '关闭'}",
             f"\n*数据*",
-            f"市场数据：{data_status}",
-            f"账户数据：{acc_age:.0f} 分钟前",
-            f"WebSocket 推送：{ws_status}",
+            f"WebSocket 实时推送：{ws_status}{hl_data_line}",
             f"\n*自动仓位*：{auto_count} 个",
             f"\n*快速操作*",
-            f"/market — 市场概览",
+            f"/market — 跨所行情",
             f"/position — 我的持仓",
             f"/alerts — 异动信号",
-            f"/autotrade — 自动交易配置",
         ]
         send(chat_id, "\n".join(lines), thread_id=thread_id)
 
@@ -1302,8 +1335,7 @@ def register_commands():
         {"command": "report",   "description": "今日市场报告"},
         {"command": "weekly",   "description": "本周复盘报告"},
         {"command": "arb",      "description": "套利 — /arb scan | /arb open BTC 500 | /arb status"},
-        {"command": "grid",     "description": "网格 — /grid BTC 90000 100000 10 50 | /grid status"},
-        {"command": "backtest",          "description": "策略回测（合成数据快速验证）"},
+        {"command": "grid",     "description": "网格交易（Hyperliquid）— /grid BTC 90000 100000 10 50"},
         {"command": "trade",             "description": "交易 — /trade open ETH long 100 | /trade close ETH"},
         {"command": "override_circuit",  "description": "临时覆盖每日亏损熔断（1小时有效）"},
         {"command": "compare",   "description": "跨所价格对比 — /compare BTC"},
