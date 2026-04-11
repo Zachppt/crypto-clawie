@@ -87,6 +87,10 @@ env = {k: os.getenv(k, "") for k in [
     "HL_DEFAULT_LEVERAGE", "HL_DEFAULT_MARGIN_MODE",
     "HL_FUNDING_ALERT_THRESHOLD", "HL_LIQ_ALERT_THRESHOLD",
     "BLOCKBEATS_API_KEY", "AUTONOMOUS_MODE", "MAX_POSITION_SIZE_USD",
+    "TRADING_EXCHANGE",
+    "BINANCE_API_KEY", "BINANCE_SECRET_KEY",
+    "OKX_API_KEY", "OKX_SECRET_KEY", "OKX_PASSPHRASE",
+    "BYBIT_API_KEY", "BYBIT_SECRET_KEY",
 ]}
 
 # ── Telegram 工具 ─────────────────────────────────────────────────────────────
@@ -163,7 +167,8 @@ _skill_map = {
     "net_flow":      ("skills.net_flow",      "NetFlowSkill"),
     "mm_analysis":   ("skills.mm_analysis",   "MMAnalysisSkill"),
     "focus":         ("skills.focus",          "FocusSkill"),
-    "ai_agent":      ("skills.ai_agent",       "AIAgentSkill"),
+    "ai_agent":        ("skills.ai_agent",         "AIAgentSkill"),
+    "exchange_trade":  ("skills.exchange_trade",   "ExchangeTradeSkill"),
 }
 
 def skill(name: str, override_env: dict = None):
@@ -608,6 +613,48 @@ def _route(chat_id: int, cmd: str, args: list, thread_id: int = None):
     # ── 交易指令 ─────────────────────────────────────────────────────────────
     elif cmd == "trade":
         sub = args[0].lower() if args else "positions"
+
+        # 检测交易所：最后一个参数若是已知交易所名则提取，否则用默认值
+        _known_exchanges = ("binance", "okx", "bybit", "hyperliquid", "hl")
+        _ex_arg = args[-1].lower() if args and args[-1].lower() in _known_exchanges else None
+        if _ex_arg:
+            args = args[:-1]
+        _exchange = (_ex_arg or os.getenv("TRADING_EXCHANGE", "hyperliquid")).lower()
+        _exchange = "hyperliquid" if _exchange == "hl" else _exchange
+
+        # 非 HL 交易所 → 路由到 exchange_trade
+        if _exchange != "hyperliquid":
+            _ex_label = {"binance": "Binance", "okx": "OKX", "bybit": "Bybit"}.get(_exchange, _exchange)
+            if sub in ("open", "做多", "做空"):
+                sym     = args[1].upper() if len(args) > 1 else "BTC"
+                side    = args[2].lower() if len(args) > 2 else "long"
+                try:
+                    size_usd = float(args[3]) if len(args) > 3 else 100.0
+                except ValueError:
+                    send(chat_id, "❌ 格式：`/trade open BTC long 100 binance`", thread_id=_tid(TOPIC_TRADE))
+                    return
+                lev = int(args[4]) if len(args) > 4 else None
+                send(chat_id, f"⏳ 正在 {_ex_label} 开仓...", thread_id=_tid(TOPIC_TRADE))
+                r = skill("exchange_trade").run(
+                    action="open", exchange=_exchange,
+                    symbol=sym, side=side, size_usd=size_usd, leverage=lev,
+                )
+            elif sub in ("close", "平仓"):
+                sym = args[1].upper() if len(args) > 1 else None
+                if not sym:
+                    send(chat_id, "❌ 格式：`/trade close BTC binance`", thread_id=_tid(TOPIC_TRADE))
+                    return
+                send(chat_id, f"⏳ 正在 {_ex_label} 平仓...", thread_id=_tid(TOPIC_TRADE))
+                r = skill("exchange_trade").run(action="close", exchange=_exchange, symbol=sym)
+            elif sub in ("leverage", "杠杆"):
+                sym = args[1].upper() if len(args) > 1 else "BTC"
+                lev = int(args[2]) if len(args) > 2 else 3
+                r = skill("exchange_trade").run(action="leverage", exchange=_exchange, symbol=sym, leverage=lev)
+            else:
+                r = skill("exchange_trade").run(action="positions", exchange=_exchange)
+            send(chat_id, r["text"], thread_id=_tid(TOPIC_TRADE))
+            return
+
         if sub in ("open", "做多", "做空"):
             sym     = args[1].upper() if len(args) > 1 else "ETH"
             side    = args[2].lower() if len(args) > 2 else "long"
