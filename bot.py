@@ -17,6 +17,8 @@ bot.py — Telegram 指令机器人
   行情
     /price BTC         — 实时价格（默认 BTC）
     /fng               — 恐慌贪婪指数
+    /ta BTC            — 技术分析（RSI/MA/BB/MACD）
+    /ta ETH 4h signal  — 指定周期 + 精简信号
 
   快讯
     /news              — 最新快讯（前 10 条）
@@ -169,6 +171,7 @@ _skill_map = {
     "focus":         ("skills.focus",          "FocusSkill"),
     "ai_agent":        ("skills.ai_agent",         "AIAgentSkill"),
     "exchange_trade":  ("skills.exchange_trade",   "ExchangeTradeSkill"),
+    "ta_analysis":     ("skills.ta_analysis",      "TAAnalysisSkill"),
 }
 
 def skill(name: str, override_env: dict = None):
@@ -255,6 +258,12 @@ HELP_TEXT = r"""🤖 *Clawie 指令列表*
 /price — 价格（默认 BTC）
 /price ETH — 指定币种价格
 /fng — 恐慌贪婪指数
+
+*技术分析*
+/ta BTC — BTC 1h 技术全分析（RSI + MA + BB + MACD）
+/ta ETH 4h — 指定时间周期
+/ta SOL 1d signal — 只看交易信号
+/ta BTC 1h ohlcv — 原始 K 线数据
 
 *快讯*
 /news — 最新快讯
@@ -549,6 +558,31 @@ def _route(chat_id: int, cmd: str, args: list, thread_id: int = None):
         r = skill("crypto_data").run(action="fng")
         send(chat_id, r["text"], thread_id=_tid(TOPIC_MARKET))
 
+    # ── 技术分析 ──────────────────────────────────────────────────────────────
+    # 用法：/ta [symbol] [timeframe] [action] [exchange]
+    # 例：  /ta BTC 4h       /ta ETH 1d signal    /ta SOL 1h ohlcv binance
+    elif cmd == "ta":
+        _VALID_TF      = {"1m", "5m", "15m", "30m", "1h", "4h", "1d", "1w"}
+        _VALID_ACTIONS = {"analysis", "signal", "ohlcv"}
+        _VALID_EX      = {"binance", "okx", "bybit", "gateio", "bitget"}
+        ta_sym    = "BTC"
+        ta_tf     = "1h"
+        ta_action = "analysis"
+        ta_ex     = "binance"
+        for a in args:
+            al = a.lower()
+            if al in _VALID_TF:
+                ta_tf = al
+            elif al in _VALID_ACTIONS:
+                ta_action = al
+            elif al in _VALID_EX:
+                ta_ex = al
+            elif a.upper().isalpha():
+                ta_sym = a.upper()
+        r = skill("ta_analysis").run(action=ta_action, symbol=ta_sym,
+                                     exchange=ta_ex, timeframe=ta_tf)
+        send(chat_id, r["text"], thread_id=_tid(TOPIC_MARKET))
+
     # ── 快讯 ─────────────────────────────────────────────────────────────────
     elif cmd == "news":
         r = skill("crypto_news").run(action="latest")
@@ -746,7 +780,7 @@ def _route(chat_id: int, cmd: str, args: list, thread_id: int = None):
         send(chat_id, r["text"], thread_id=_tid(TOPIC_TRADE))
 
     # ── 专项追踪 ─────────────────────────────────────────────────────────────
-    elif cmd in ("focus", "追踪"):
+    elif cmd in ("track", "追踪"):  # 注意：/focus 被 OpenClaw Agent 占用，改用 /track
         sub = args[0].lower() if args else "status"
 
         if sub in ("cancel", "stop", "取消", "停止"):
@@ -757,12 +791,12 @@ def _route(chat_id: int, cmd: str, args: list, thread_id: int = None):
 
         elif sub in ("report", "报告", "now"):
             send(chat_id, "⏳ 正在生成专项报告...", thread_id=_tid(TOPIC_MARKET))
-            # /focus report [TOKEN] — 立即生成，token 可选
+            # /track report [TOKEN] — 立即生成，token 可选
             token = args[1].upper() if len(args) > 1 else None
             r = skill("focus").run(action="report", token=token)
 
         else:
-            # /focus SOL [15]  — sub 就是 token
+            # /track SOL [15]  — sub 就是 token
             token        = sub.upper()
             interval_min = int(args[1]) if len(args) > 1 and args[1].isdigit() else 15
             r = skill("focus").run(
@@ -1114,6 +1148,7 @@ def _route(chat_id: int, cmd: str, args: list, thread_id: int = None):
         _bs = BaseSkill(DATA_DIR, MEMORY_DIR, env)
         mkt_age = _bs.data_age_minutes("hl_market.json")
         acc_age = _bs.data_age_minutes("hl_account.json")
+        ws_age  = _bs.data_age_minutes("ws_prices.json") * 60  # 转秒
 
         if mkt_age < 6:
             data_status = f"✅ 正常（{mkt_age:.0f} 分钟前）"
@@ -1121,6 +1156,8 @@ def _route(chat_id: int, cmd: str, args: list, thread_id: int = None):
             data_status = f"⚠️ 偏旧（{mkt_age:.0f} 分钟前）"
         else:
             data_status = f"❌ 过期（{mkt_age:.0f} 分钟前，调度器可能未运行）"
+
+        ws_status = f"⚡ 在线（{ws_age:.0f}s 前）" if ws_age <= 10 else "⏸️ 未运行（可选）"
 
         # 自动交易仓位
         auto_trades_path = MEMORY_DIR / "auto_trades.json"
@@ -1143,6 +1180,7 @@ def _route(chat_id: int, cmd: str, args: list, thread_id: int = None):
             f"\n*数据*",
             f"市场数据：{data_status}",
             f"账户数据：{acc_age:.0f} 分钟前",
+            f"WebSocket 推送：{ws_status}",
             f"\n*自动仓位*：{auto_count} 个",
             f"\n*快速操作*",
             f"/market — 市场概览",
@@ -1173,6 +1211,7 @@ def register_commands():
         {"command": "liq",      "description": "爆仓风险评估"},
         {"command": "price",    "description": "实时价格，/price ETH 查指定币种"},
         {"command": "fng",      "description": "恐慌贪婪指数"},
+        {"command": "ta",       "description": "技术分析，/ta BTC 4h signal"},
         {"command": "news",     "description": "最新快讯（前10条）"},
         {"command": "hlnews",   "description": "Hyperliquid 相关快讯"},
         {"command": "alerts",   "description": "全部异动信号扫描"},
@@ -1190,7 +1229,7 @@ def register_commands():
         {"command": "listings",  "description": "查询代币上架情况（现货+合约）— /listings SOL"},
         {"command": "agent",     "description": "Agent 分析 — /agent scan | status | history"},
         {"command": "netflow",   "description": "交易所净流量 — /netflow [24h] | signal BTC | wallets"},
-        {"command": "focus",     "description": "专项追踪 — /focus SOL [15min] | report | cancel"},
+        {"command": "track",     "description": "专项追踪 — /track SOL [15min] | report | cancel"},
         {"command": "mm",        "description": "做市商阶段分析 — /mm SOL | /mm scan"},
         {"command": "strategy",  "description": "策略向导 — /strategy new | show | on | off"},
         {"command": "ask",    "description": "整理市场数据上下文 — /ask 现在 SOL 适合做多吗？"},

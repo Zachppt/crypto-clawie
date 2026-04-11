@@ -80,23 +80,40 @@ class CryptoDataSkill(BaseSkill):
         if hl:
             hl_asset = next((a for a in hl.get("assets", []) if a["symbol"] == sym), None)
 
-        # 价格：缓存 < 90s → 用缓存；否则实时获取
+        # ── 价格来源优先级：WebSocket 实时 > REST 缓存 > REST 实时 > HL 缓存 ──
         price_data = None
         source     = "cache"
 
-        if snap_age <= 90 and snap:
+        # 1. WebSocket 实时（ws_feeder.py 运行时可用，< 5s 视为有效）
+        ws_age = self.data_age_minutes("ws_prices.json") * 60  # 秒
+        if ws_age <= 5:
+            ws = self.load("ws_prices.json")
+            if ws:
+                prices_map = ws if isinstance(ws, dict) else ws.get("prices", {})
+                wp = prices_map.get(sym)
+                if wp and wp.get("price"):
+                    price_data = {
+                        "price":      float(wp["price"]),
+                        "change_24h": float(wp.get("change_24h") or 0),
+                        "volume_usdt": float(wp.get("volume_24h") or 0),
+                    }
+                    source = "ws"
+
+        # 2. REST 缓存（< 90s）
+        if not price_data and snap_age <= 90 and snap:
             cached = snap.get("prices", {}).get(sym)
             if cached:
                 price_data = cached
                 source     = "cache"
 
+        # 3. Binance REST 实时
         if not price_data:
             live = self._live_binance(sym)
             if live:
                 price_data = live
                 source     = "live"
 
-        # 最后退回 HL 缓存价格
+        # 4. HL 缓存
         if not price_data and hl_asset:
             price_data = {
                 "price":      hl_asset["mark_price"],
@@ -117,8 +134,10 @@ class CryptoDataSkill(BaseSkill):
         )
         if hl_asset:
             text += f"\n资金费率(8h)：`{hl_asset['funding_8h']*100:+.4f}%`"
-        if source == "live":
-            text += "\n_✨ 实时价格_"
+        if source == "ws":
+            text += "\n_⚡ WebSocket 实时_"
+        elif source == "live":
+            text += "\n_✨ REST 实时_"
 
         return self.ok(text, data={**price_data, "source": source, "symbol": sym})
 
