@@ -31,6 +31,11 @@ bot.py — Telegram 指令机器人
 
   快捷查询
     /BTC /ETH /SOL 等  — 价格 + 资金费率（任意 HL 交易对）
+
+  数据上下文整理（配合群组内 AI Agent 使用）
+    /ask <问题>        — 整理市场数据 + 附问题，@AI Agent 分析
+    /deep <TOKEN>      — 整理币种深度数据（MM 阶段 + 跨所费率）
+    /advice            — 整理当前持仓数据，@AI Agent 给建议
 """
 
 import os
@@ -128,6 +133,19 @@ def answer_callback(callback_id: str, text: str = ""):
 # key: str(chat_id), value: dict with trade params + expires_at
 _pending_trades: dict = {}
 
+# ── 策略向导状态机 ─────────────────────────────────────────────────────────────
+# key: str(chat_id), value: {"step": int, "data": dict, "thread_id": int|None}
+_wizard_state: dict = {}
+
+WIZARD_STEPS = [
+    ("token",       "📌 *第 1/6 步*\n你想交易哪个币种？\n\n例：`BTC`、`ETH`、`SOL`"),
+    ("direction",   "📌 *第 2/6 步*\n交易方向？\n\n• `long` — 只做多\n• `short` — 只做空\n• `both` — 双向均可"),
+    ("entry_type",  "📌 *第 3/6 步*\n入场触发条件？\n\n• `funding` — 资金费率超阈值时入场\n• `agent` — 由 Agent 多因子评分决策\n• `manual` — 我自己看时机，Agent 帮我执行"),
+    ("size_usd",    "📌 *第 4/6 步*\n每笔仓位金额？（USD）\n\n例：`100`（建议从小额开始）"),
+    ("stop_pct",    "📌 *第 5/6 步*\n止损百分比？\n\n例：`2` 表示亏损 2% 自动平仓"),
+    ("profit_pct",  "📌 *第 6/6 步*\n止盈百分比？\n\n例：`5` 表示盈利 5% 自动平仓"),
+]
+
 # ── Skill 工厂 ────────────────────────────────────────────────────────────────
 
 _skill_map = {
@@ -142,6 +160,10 @@ _skill_map = {
     "exchange_agg":  ("skills.exchange_agg",  "ExchangeAggSkill"),
     "onchain":       ("skills.onchain",       "OnchainSkill"),
     "agent_trade":   ("skills.agent_trade",   "AgentTradeSkill"),
+    "net_flow":      ("skills.net_flow",      "NetFlowSkill"),
+    "mm_analysis":   ("skills.mm_analysis",   "MMAnalysisSkill"),
+    "focus":         ("skills.focus",          "FocusSkill"),
+    "ai_agent":      ("skills.ai_agent",       "AIAgentSkill"),
 }
 
 def skill(name: str, override_env: dict = None):
@@ -263,6 +285,11 @@ HELP_TEXT = r"""🤖 *Clawie 指令列表*
 /agent status — Agent 状态与近期决策
 /agent history — 历史决策记录
 
+*数据上下文整理（配合 AI Agent 使用）*
+/ask 现在 SOL 适合做多吗？ — 整理市场数据 + 附问题，供 @AI Agent 分析
+/deep BTC — 整理指定币种深度数据（MM 阶段 + 跨所费率）
+/advice — 整理当前持仓数据，供 @AI Agent 给出操作建议
+
 *链上监控*
 /watch add ETH 0x1234... 标签 — 添加地址监控
 /watch list — 查看监控列表
@@ -302,6 +329,19 @@ def handle(update: dict):
     thread_id = msg.get("message_thread_id")
     text      = msg.get("text", "").strip()
 
+    if not text:
+        return
+
+    # ── 策略向导拦截（优先于命令路由） ───────────────────────────────────────
+    cid_key = str(chat_id)
+    if cid_key in _wizard_state and not text.startswith("/cancel"):
+        try:
+            _handle_wizard(chat_id, text, thread_id)
+        except Exception as e:
+            log.error(f"wizard error: {e}", exc_info=True)
+            send(chat_id, f"❌ 向导出错：{e}", thread_id=thread_id)
+        return
+
     if not text.startswith("/"):
         return
 
@@ -316,6 +356,87 @@ def handle(update: dict):
     except Exception as e:
         log.error(f"route error: {e}", exc_info=True)
         send(chat_id, f"❌ 执行出错：{e}", thread_id=thread_id)
+
+
+def _handle_wizard(chat_id: int, text: str, thread_id: int = None):
+    """处理策略向导多步对话。"""
+    cid_key = str(chat_id)
+    state   = _wizard_state.get(cid_key)
+    if not state:
+        return
+
+    step     = state["step"]
+    data     = state["data"]
+    field, _ = WIZARD_STEPS[step]
+    answer   = text.strip()
+
+    # 简单校验
+    validators = {
+        "token":       lambda v: v.upper() if v.isalpha() and len(v) <= 10 else None,
+        "direction":   lambda v: v.lower() if v.lower() in ("long", "short", "both") else None,
+        "entry_type":  lambda v: v.lower() if v.lower() in ("funding", "agent", "manual") else None,
+        "size_usd":    lambda v: str(float(v)) if float(v) >= 1 else None,
+        "stop_pct":    lambda v: str(float(v)) if 0 < float(v) <= 50 else None,
+        "profit_pct":  lambda v: str(float(v)) if 0 < float(v) <= 100 else None,
+    }
+
+    try:
+        validated = validators[field](answer)
+    except Exception:
+        validated = None
+
+    if validated is None:
+        send(chat_id, f"⚠️ 输入无效，请重新输入。", thread_id=thread_id)
+        return
+
+    data[field] = validated
+    next_step   = step + 1
+
+    if next_step < len(WIZARD_STEPS):
+        # 继续下一步
+        _wizard_state[cid_key]["step"] = next_step
+        _, prompt = WIZARD_STEPS[next_step]
+        send(chat_id, prompt + "\n\n_发送 /cancel 退出向导_", thread_id=thread_id)
+    else:
+        # 向导完成
+        del _wizard_state[cid_key]
+        _save_strategy(data)
+
+        token     = data["token"].upper()
+        direction = data["direction"]
+        size      = float(data["size_usd"])
+        stop      = float(data["stop_pct"])
+        profit    = float(data["profit_pct"])
+        etype     = data["entry_type"]
+
+        etype_label = {"funding": "资金费率触发", "agent": "Agent 评分决策", "manual": "我手动确认"}.get(etype, etype)
+
+        summary = (
+            f"✅ *策略配置已保存！*\n\n"
+            f"• 标的：`{token}`\n"
+            f"• 方向：`{direction}`\n"
+            f"• 入场方式：`{etype_label}`\n"
+            f"• 每笔仓位：`${size:.0f}` USDC\n"
+            f"• 止损：`-{stop}%`\n"
+            f"• 止盈：`+{profit}%`\n\n"
+            f"Agent 会在满足条件时自动执行此策略。\n"
+            f"发送 `/strategy show` 查看，`/strategy off` 暂停。"
+        )
+        send(chat_id, summary, thread_id=thread_id)
+        log.info(f"Strategy wizard completed for chat {chat_id}: {data}")
+
+
+def _save_strategy(data: dict):
+    """将策略配置写入 memory/my_strategy.json。"""
+    path = MEMORY_DIR / "my_strategy.json"
+    path.parent.mkdir(exist_ok=True)
+    strategy = {
+        **data,
+        "enabled":    True,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    with open(path, "w") as f:
+        json.dump(strategy, f, ensure_ascii=False, indent=2)
 
 
 def _handle_callback(cq: dict):
@@ -576,6 +697,139 @@ def _route(chat_id: int, cmd: str, args: list, thread_id: int = None):
             r = skill("hl_trade").run(action="positions")
         send(chat_id, r["text"], thread_id=_tid(TOPIC_TRADE))
 
+    # ── 专项追踪 ─────────────────────────────────────────────────────────────
+    elif cmd in ("focus", "追踪"):
+        sub = args[0].lower() if args else "status"
+
+        if sub in ("cancel", "stop", "取消", "停止"):
+            r = skill("focus").run(action="cancel")
+
+        elif sub in ("status", "状态"):
+            r = skill("focus").run(action="status")
+
+        elif sub in ("report", "报告", "now"):
+            send(chat_id, "⏳ 正在生成专项报告...", thread_id=_tid(TOPIC_MARKET))
+            # /focus report [TOKEN] — 立即生成，token 可选
+            token = args[1].upper() if len(args) > 1 else None
+            r = skill("focus").run(action="report", token=token)
+
+        else:
+            # /focus SOL [15]  — sub 就是 token
+            token        = sub.upper()
+            interval_min = int(args[1]) if len(args) > 1 and args[1].isdigit() else 15
+            r = skill("focus").run(
+                action="set", token=token, interval_min=interval_min,
+                chat_id=str(chat_id), topic_id=str(_tid(TOPIC_MARKET)) if TOPIC_MARKET else None,
+            )
+
+        send(chat_id, r["text"], thread_id=_tid(TOPIC_MARKET))
+
+    # ── 做市商阶段分析 ────────────────────────────────────────────────────────
+    elif cmd in ("mm", "phase", "阶段"):
+        sub = args[0].upper() if args else None
+
+        if sub in ("scan", "all", "全局") or not sub:
+            send(chat_id, "🕵️ 正在扫描做市商阶段...", thread_id=_tid(TOPIC_MARKET))
+            r = skill("mm_analysis").run(action="scan")
+        else:
+            # /mm SOL — 分析指定币种
+            send(chat_id, f"🕵️ 正在分析 {sub} 做市商阶段...", thread_id=_tid(TOPIC_MARKET))
+            r = skill("mm_analysis").run(action="analyze", symbol=sub)
+
+        send(chat_id, r["text"], thread_id=_tid(TOPIC_MARKET))
+
+    # ── 用户策略配置 ──────────────────────────────────────────────────────────
+    elif cmd in ("strategy", "策略"):
+        sub = args[0].lower() if args else "show"
+
+        if sub in ("new", "set", "新建", "配置"):
+            # 启动向导
+            cid_key = str(chat_id)
+            _wizard_state[cid_key] = {"step": 0, "data": {}, "thread_id": thread_id}
+            _, prompt = WIZARD_STEPS[0]
+            send(chat_id,
+                 "🎯 *策略配置向导*\n\n"
+                 "我将引导你设置一个 24h 自动执行的交易策略。\n"
+                 "共 6 步，随时发送 /cancel 退出。\n\n" + prompt,
+                 thread_id=thread_id)
+            return  # 不执行后续 send
+
+        elif sub in ("show", "view", "查看"):
+            path = MEMORY_DIR / "my_strategy.json"
+            if not path.exists():
+                send(chat_id,
+                     "⚠️ 还没有配置策略。\n发送 `/strategy new` 启动配置向导。",
+                     thread_id=thread_id)
+                return
+            s = json.load(open(path))
+            etype_label = {"funding": "资金费率触发", "agent": "Agent 评分决策", "manual": "我手动确认"}.get(
+                s.get("entry_type", ""), s.get("entry_type", "—"))
+            lines = [
+                "🎯 *我的交易策略*\n",
+                f"• 标的：`{s.get('token', '—')}`",
+                f"• 方向：`{s.get('direction', '—')}`",
+                f"• 入场方式：`{etype_label}`",
+                f"• 每笔仓位：`${float(s.get('size_usd', 0)):.0f}` USDC",
+                f"• 止损：`-{s.get('stop_pct', '—')}%`",
+                f"• 止盈：`+{s.get('profit_pct', '—')}%`",
+                f"• 状态：{'✅ 启用' if s.get('enabled') else '⏸️ 暂停'}",
+                f"\n配置时间：`{s.get('created_at', '')[:16]} UTC`",
+                f"\n`/strategy new` — 重新配置",
+                f"`/strategy off` — 暂停策略",
+            ]
+            send(chat_id, "\n".join(lines), thread_id=thread_id)
+            return
+
+        elif sub in ("off", "pause", "暂停"):
+            path = MEMORY_DIR / "my_strategy.json"
+            if path.exists():
+                s = json.load(open(path))
+                s["enabled"] = False
+                json.dump(s, open(path, "w"), ensure_ascii=False, indent=2)
+                send(chat_id, "⏸️ 策略已暂停，Agent 不再自动执行。\n`/strategy on` 可重新启用。", thread_id=thread_id)
+            else:
+                send(chat_id, "⚠️ 没有策略配置。", thread_id=thread_id)
+            return
+
+        elif sub in ("on", "resume", "启用"):
+            path = MEMORY_DIR / "my_strategy.json"
+            if path.exists():
+                s = json.load(open(path))
+                s["enabled"] = True
+                json.dump(s, open(path, "w"), ensure_ascii=False, indent=2)
+                send(chat_id, "✅ 策略已重新启用，Agent 会继续监控并执行。", thread_id=thread_id)
+            else:
+                send(chat_id, "⚠️ 没有策略配置，请先发送 `/strategy new`。", thread_id=thread_id)
+            return
+
+        elif sub in ("delete", "删除"):
+            path = MEMORY_DIR / "my_strategy.json"
+            if path.exists():
+                path.unlink()
+                send(chat_id, "🗑️ 策略已删除。", thread_id=thread_id)
+            else:
+                send(chat_id, "⚠️ 没有策略配置。", thread_id=thread_id)
+            return
+
+        else:
+            send(chat_id,
+                 "🎯 *策略向导指令*\n\n"
+                 "`/strategy new` — 配置新策略（向导模式）\n"
+                 "`/strategy show` — 查看当前策略\n"
+                 "`/strategy on/off` — 启用/暂停\n"
+                 "`/strategy delete` — 删除策略",
+                 thread_id=thread_id)
+            return
+
+    # ── /cancel — 退出任意向导 ────────────────────────────────────────────────
+    elif cmd == "cancel":
+        cid_key = str(chat_id)
+        if cid_key in _wizard_state:
+            del _wizard_state[cid_key]
+            send(chat_id, "✅ 向导已退出。", thread_id=thread_id)
+        else:
+            send(chat_id, "当前没有进行中的向导。", thread_id=thread_id)
+
     # ── 熔断覆盖 ─────────────────────────────────────────────────────────────
     elif cmd == "override_circuit":
         import json as _json
@@ -615,6 +869,32 @@ def _route(chat_id: int, cmd: str, args: list, thread_id: int = None):
         r = skill("exchange_agg").run(action="divergence")
         send(chat_id, r["text"], thread_id=_tid(TOPIC_MARKET))
 
+    elif cmd in ("listings", "listed", "上架"):
+        sym = args[0].upper() if args else "BTC"
+        send(chat_id, f"⏳ 正在查询 {sym} 上架情况...", thread_id=_tid(TOPIC_MARKET))
+        r = skill("exchange_agg").run(action="listings", symbol=sym)
+        send(chat_id, r["text"], thread_id=_tid(TOPIC_MARKET))
+
+    # ── 交易所净流量 ──────────────────────────────────────────────────────────
+    elif cmd in ("netflow", "flow", "净流量"):
+        sub = args[0].lower() if args else "analyze"
+        if sub in ("signal", "信号"):
+            sym = args[1].upper() if len(args) > 1 else "BTC"
+            send(chat_id, "⏳ 正在分析综合信号...", thread_id=_tid(TOPIC_MARKET))
+            r = skill("net_flow").run(action="signal", symbol=sym)
+        elif sub in ("wallets", "地址"):
+            r = skill("net_flow").run(action="wallets")
+        else:
+            # /netflow [24|12|48] [USDT|USDC]
+            try:
+                hours = int(sub) if sub.isdigit() else 24
+            except ValueError:
+                hours = 24
+            token = args[1].upper() if len(args) > 1 else "USDT"
+            send(chat_id, f"⏳ 正在分析过去 {hours}h 交易所净流量...", thread_id=_tid(TOPIC_MARKET))
+            r = skill("net_flow").run(action="analyze", hours=hours, token=token)
+        send(chat_id, r["text"], thread_id=_tid(TOPIC_MARKET))
+
     # ── Agent 智能交易 ────────────────────────────────────────────────────────
     elif cmd == "agent":
         sub = args[0].lower() if args else "status"
@@ -630,6 +910,25 @@ def _route(chat_id: int, cmd: str, args: list, thread_id: int = None):
             r = skill("agent_trade").run(action="decide")
         else:
             r = skill("agent_trade").run(action="status")
+        send(chat_id, r["text"], thread_id=_tid(TOPIC_TRADE))
+
+    # ── 数据上下文整理（供群组内 AI Agent 分析）─────────────────────────────
+    elif cmd in ("ask", "分析"):
+        question = " ".join(args)
+        if not question:
+            send(chat_id, "❓ 请提供问题，例如：`/ask 现在 SOL 适合做多吗？`", thread_id=_tid(TOPIC_MARKET))
+            return
+        r = skill("ai_agent").run(action="ask", question=question)
+        send(chat_id, r["text"], thread_id=_tid(TOPIC_MARKET))
+
+    elif cmd in ("deep", "深度"):
+        sym = args[0].upper() if args else "BTC"
+        send(chat_id, f"⏳ 正在整理 {sym} 深度数据...", thread_id=_tid(TOPIC_MARKET))
+        r = skill("ai_agent").run(action="deep", symbol=sym)
+        send(chat_id, r["text"], thread_id=_tid(TOPIC_MARKET))
+
+    elif cmd in ("advice", "建议"):
+        r = skill("ai_agent").run(action="advice")
         send(chat_id, r["text"], thread_id=_tid(TOPIC_TRADE))
 
     # ── 链上监控 ─────────────────────────────────────────────────────────────
@@ -840,7 +1139,15 @@ def register_commands():
         {"command": "exfunding", "description": "跨所资金费率对比 — /exfunding BTC"},
         {"command": "vol",       "description": "跨所成交量对比 — /vol BTC"},
         {"command": "divergence","description": "跨所价差扫描"},
+        {"command": "listings",  "description": "查询代币上架情况（现货+合约）— /listings SOL"},
         {"command": "agent",     "description": "Agent 分析 — /agent scan | status | history"},
+        {"command": "netflow",   "description": "交易所净流量 — /netflow [24h] | signal BTC | wallets"},
+        {"command": "focus",     "description": "专项追踪 — /focus SOL [15min] | report | cancel"},
+        {"command": "mm",        "description": "做市商阶段分析 — /mm SOL | /mm scan"},
+        {"command": "strategy",  "description": "策略向导 — /strategy new | show | on | off"},
+        {"command": "ask",    "description": "整理市场数据上下文 — /ask 现在 SOL 适合做多吗？"},
+        {"command": "deep",   "description": "整理币种深度数据 — /deep BTC（MM阶段+跨所费率）"},
+        {"command": "advice", "description": "整理持仓上下文 — 供 AI Agent 给出操作建议"},
         {"command": "watch",     "description": "链上监控 — /watch add ETH 0x... | list | remove"},
         {"command": "chains",    "description": "链上监控概览"},
         {"command": "autotrade",         "description": "自动交易状态 / on / off"},

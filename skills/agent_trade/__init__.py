@@ -6,6 +6,8 @@ skills/agent_trade — 多因子智能交易代理
   3. 决策日志（可追溯每次开平仓原因）
   4. 持仓退出多条件判断
 """
+from __future__ import annotations
+
 import json
 import requests
 from datetime import datetime, timezone
@@ -73,10 +75,30 @@ class AgentTradeSkill(BaseSkill):
 
         return self.ok("\n".join(lines), data={"opportunities": opportunities})
 
+    # ── 读取用户自定义策略 ────────────────────────────────────────────────────
+
+    def _load_user_strategy(self) -> dict | None:
+        """读取 memory/my_strategy.json，若不存在或已禁用则返回 None。"""
+        path = self.memory_dir / "my_strategy.json"
+        if not path.exists():
+            return None
+        try:
+            import json
+            s = json.load(open(path))
+            return s if s.get("enabled") else None
+        except Exception:
+            return None
+
     # ── 生成交易决策 ──────────────────────────────────────────────────────────
 
     def _decide(self, **_) -> dict:
-        """生成可执行的交易决策（排除已有持仓的标的）。"""
+        """
+        生成可执行的交易决策。
+        若用户配置了 my_strategy.json，优先按策略约束过滤机会；
+        否则按全市场多因子评分筛选。
+        """
+        user_strategy = self._load_user_strategy()
+
         result = self._analyze()
         if not result.get("success"):
             return result
@@ -91,6 +113,24 @@ class AgentTradeSkill(BaseSkill):
             for pos in account.get("positions", []):
                 open_symbols.add(pos["symbol"])
 
+        # 应用用户策略约束
+        if user_strategy:
+            target_token = user_strategy.get("token", "").upper()
+            allowed_dir  = user_strategy.get("direction", "both").lower()
+            size_usd     = float(user_strategy.get("size_usd", self.getenv("AUTO_TRADE_SIZE_USD", "50")))
+
+            # 只保留目标币种（若配置了）
+            if target_token:
+                opps = [o for o in opps if o["symbol"] == target_token]
+
+            # 只保留匹配方向的机会
+            if allowed_dir != "both":
+                opps = [o for o in opps if o["side"] == allowed_dir]
+
+            # 使用策略中的仓位大小
+            for opp in opps:
+                opp["suggested_size_usd"] = size_usd
+
         decisions = []
         max_new   = int(self.getenv("AUTO_TRADE_MAX_POSITIONS", "2"))
         for opp in opps:
@@ -99,12 +139,12 @@ class AgentTradeSkill(BaseSkill):
             if opp["symbol"] in open_symbols:
                 continue
             decisions.append({
-                "action":      "open",
-                "symbol":      opp["symbol"],
-                "side":        opp["side"],
-                "size_usd":    opp["suggested_size_usd"],
-                "confidence":  opp["total_score"],
-                "reasons":     opp["factors"],
+                "action":       "open",
+                "symbol":       opp["symbol"],
+                "side":         opp["side"],
+                "size_usd":     opp["suggested_size_usd"],
+                "confidence":   opp["total_score"],
+                "reasons":      opp["factors"],
                 "funding_rate": opp["funding_rate"],
             })
 

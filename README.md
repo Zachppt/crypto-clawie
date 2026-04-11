@@ -1,46 +1,32 @@
-# 🤖 crypto-clawie
+# 🦞 crypto-clawie
 
-> A Hyperliquid perpetual contract trading agent — monitors funding rates, executes perp orders, detects liquidation risk, runs funding arbitrage strategies, and delivers real-time alerts via Telegram.
+> Hyperliquid perpetual contract assistant — multi-exchange data aggregation, AI Agent collaboration, funding rate monitoring, auto-alerts, and Telegram delivery.
 
-**Version:** 2.0.0 · **Python:** ≥ 3.10 · **License:** MIT
-
----
-
-## What's New in v2
-
-| Area | Upgrade |
-|---|---|
-| ⚡ **Performance** | Async concurrent fetcher (aiohttp) — 4 data sources in parallel, ~3s vs ~12s |
-| 🔔 **Alerts** | SQLite-backed deduplication — survives restarts, no more alert spam |
-| 🎯 **Signals** | Multi-factor confidence scoring — funding + OI + price momentum confluence |
-| 💰 **Strategy** | Funding rate arbitrage skill — scan, open, track, close delta-neutral positions |
-| 📊 **Grid** | Grid trading manager — place layered limit orders across a price range |
-| 🧪 **Backtest** | Backtesting engine for strategy parameter validation |
-| 🛡️ **Safety** | Daily loss circuit breaker — auto-blocks new positions after loss threshold |
-| 🔧 **UX** | Telegram Inline confirmation flow, clear Binance hedge quantities, honest pending state |
+**Version:** 3.0.0 · **Python:** ≥ 3.9 · **License:** MIT · **[中文文档](README_CN.md)**
 
 ---
 
 ## Architecture
 
-```
-Telegram ↔ bot.py (command router)
-              │
-              ├── skills/hl_monitor     ← funding rates, OI, positions, liquidation
-              ├── skills/hl_trade       ← open/close/leverage/cancel (EIP-712)
-              ├── skills/funding_arb    ← delta-neutral funding arbitrage
-              ├── skills/hl_grid        ← grid order management
-              ├── skills/crypto_alert   ← multi-factor signal scoring
-              ├── skills/crypto_data    ← price + Fear & Greed
-              ├── skills/crypto_news    ← BlockBeats news
-              ├── skills/crypto_report  ← daily/weekly reports
-              └── backtest/engine       ← offline strategy backtesting
+Two roles co-exist in the same Telegram group:
 
-Background (pm2):
-  scheduler.py  ← APScheduler: fetch every 5m, alerts, daily/weekly reports
-  fetcher.py    ← async aiohttp: HL + Binance + FNG + BlockBeats concurrent
-  db.py         ← SQLite alert deduplication state
 ```
+Telegram Group
+├── @ScriptBot  (bot.py)              ← slash commands → structured data
+│     Reads local skill cache
+│     Price refresh every 60s
+│     Full market refresh every 5min
+│
+└── @AI Agent   (OpenClaw)            ← @mention → reasoning + web search
+      Reads data/*.json cache
+      User-configured LLM (Claude / GPT / Gemini / local)
+      Can access real-time internet data
+```
+
+| Mode | How | Best for |
+|---|---|---|
+| Direct data | `/command` | Price, funding, positions, alerts |
+| AI analysis | `@AIAgent question` or `/ask /deep /advice` | Reasoning, judgment, synthesis |
 
 ---
 
@@ -65,7 +51,7 @@ TELEGRAM_CHAT_ID=...
 HL_USE_TESTNET=true          # Start on testnet
 AUTONOMOUS_MODE=false        # Manual confirm all trades
 MAX_POSITION_SIZE_USD=500
-MAX_DAILY_LOSS_PCT=5         # Circuit breaker threshold
+MAX_DAILY_LOSS_PCT=5
 ```
 
 ### 3. Verify
@@ -77,7 +63,7 @@ pm2 logs clawie-scheduler
 
 ---
 
-## Telegram Commands
+## Command Reference
 
 ### Account
 | Command | Description |
@@ -85,72 +71,134 @@ pm2 logs clawie-scheduler
 | `/position` | Holdings and account balance |
 | `/liq` | Liquidation risk assessment |
 
-### Market
+### Market (Hyperliquid)
 | Command | Description |
 |---|---|
-| `/market` | Overview: funding + sentiment + account |
+| `/market` | Overview: funding Top5 + sentiment + account |
 | `/funding` | Funding rate leaderboard Top 20 |
 | `/funding BTC` | Single asset funding details |
-| `/oi` | Open interest Top 10 |
-| `/price ETH` | Real-time price |
+| `/oi` / `/oi BTC` | Open interest Top 10 / single asset |
+| `/price ETH` | Real-time price (auto-fallback to live Binance if cache stale) |
 | `/fng` | Fear & Greed index |
 | `/BTC` `/ETH` `/SOL` | Quick: price + funding for any HL symbol |
 
-### Alerts & Reports
+### Multi-Exchange (Binance · OKX · Bybit · Gate.io · Bitget · HL)
+| Command | Description |
+|---|---|
+| `/compare BTC` | Cross-exchange price comparison |
+| `/exfunding BTC` | Cross-exchange funding rate comparison |
+| `/vol BTC` | Cross-exchange volume comparison |
+| `/divergence` | Scan price divergence across major coins |
+| `/listings SOL` | Check which exchanges list a token (spot + perp) |
+
+### News
+| Command | Description |
+|---|---|
+| `/news` | Latest BlockBeats flash news |
+| `/hlnews` | HL-related news only |
+
+### Signals & Reports
 | Command | Description |
 |---|---|
 | `/alerts` | Multi-factor signal scan with confidence scores |
 | `/report` | Daily market + account summary |
 | `/weekly` | Weekly recap |
-| `/news` | Latest BlockBeats flash news |
-| `/hlnews` | HL-related news only |
 
-### Strategy
+### Focus Tracking
+| Command | Description |
+|---|---|
+| `/focus SOL` | Start auto-tracking SOL every 15 min |
+| `/focus SOL 30` | Custom interval (minutes) |
+| `/focus report` | Generate report immediately |
+| `/focus status` | View tracking config |
+| `/focus cancel` | Stop tracking |
+
+### Market Maker Phase Analysis
+| Command | Description |
+|---|---|
+| `/mm SOL` | Analyze MM phase for a coin |
+| `/mm scan` | Scan top coins by funding rate |
+
+Phases: 📦 Accumulation · 🌀 Wash Trading · 📤 Distribution · 🚀 Pump Setup
+
+### Exchange Net Flow
+| Command | Description |
+|---|---|
+| `/netflow` | Last 24h CEX net flow (USDT ERC-20) |
+| `/netflow 12` | Last 12 hours |
+| `/netflow signal BTC` | Combined flow + funding signal |
+| `/netflow wallets` | List monitored exchange hot wallets |
+
+### Strategy Wizard
+| Command | Description |
+|---|---|
+| `/strategy new` | 6-step interactive strategy setup |
+| `/strategy show` | View current strategy |
+| `/strategy on` / `off` | Enable / pause |
+| `/strategy delete` | Delete strategy |
+
+### Agent (Rule-Based Scoring)
+| Command | Description |
+|---|---|
+| `/agent scan` | Multi-factor market scan |
+| `/agent status` | Agent state + recent decisions |
+| `/agent history` | Decision history |
+| `/agent decide` | Generate executable decision |
+
+### Context Prep for AI Agent
+| Command | Description |
+|---|---|
+| `/ask <question>` | Assemble market context + question for AI Agent |
+| `/deep BTC` | Deep context: MM phase + cross-exchange funding |
+| `/advice` | Assemble position context for AI Agent advice |
+
+### Trading
+| Command | Description |
+|---|---|
+| `/trade open ETH long 100` | Open long ETH $100 |
+| `/trade open BTC short 200 3` | Open short BTC $200, 3x leverage |
+| `/trade close ETH` | Close position |
+| `/trade leverage ETH 5 cross` | Set leverage |
+| `/override_circuit` | Override daily loss circuit breaker (1 hour) |
+
+### Arbitrage & Strategy
 | Command | Description |
 |---|---|
 | `/arb scan` | Scan funding arbitrage opportunities |
 | `/arb open BTC 500` | Record arb position ($500 USDC) |
 | `/arb status` | View active arb positions + estimated income |
-| `/arb close BTC` | Close arb position record |
-| `/grid BTC 90000 100000 10 50` | Create grid (low high count size_per_grid_usd) |
-| `/grid` | View all active grids |
-| `/grid cancel <grid_id>` | Cancel a grid |
+| `/arb close BTC` | Close arb record |
+| `/grid BTC 90000 100000 10 50` | Create grid (low high grids size_per_grid) |
+| `/grid` | View active grids |
 | `/backtest` | Run funding arb backtest on synthetic data |
 
----
-
-## Funding Rate Arbitrage
-
-Delta-neutral strategy: short HL perp + long Binance spot = collect funding with no directional exposure.
-
-**Entry:** `|funding_8h| ≥ 0.05%` (≈ 54% annualized)  
-**Exit:** `|funding_8h| ≤ 0.01%`
-
-```
-/arb scan               → find opportunities
-/arb open BTC 500       → record HL short + shows exact Binance buy qty
-/arb status             → track income, see exit signal
-/arb close BTC          → close record + shows exact Binance sell qty
-```
-
-> Note: The HL perp leg executes automatically (requires `AUTONOMOUS_MODE=true`). The Binance spot hedge is always manual — the bot shows the exact quantity and price.
+### On-chain Monitoring
+| Command | Description |
+|---|---|
+| `/watch add ETH 0x... label` | Monitor an address |
+| `/watch list` | List monitored addresses |
+| `/watch ETH 0x...` | View recent transactions |
+| `/watch remove ETH 0x...` | Remove monitoring |
+| `/chains` | On-chain monitoring overview |
 
 ---
 
-## Alert Thresholds
+## AI Agent Collaboration
 
-| Signal | Condition | Confidence |
-|---|---|---|
-| Funding extreme | `\|rate_8h\| ≥ 0.1%` | Up to 100% |
-| Funding high | `\|rate_8h\| ≥ 0.05%` | 40–70% |
-| OI confirmation | OI > $50M (same direction) | +20% |
-| Price momentum | 24h move > 3% (same direction) | +10% |
-| Low liquidity discount | UTC 16:00–22:00 (CST 00:00–06:00) | −10% |
-| Liquidation risk critical | Distance < 5% | 100% |
-| Liquidation risk high | Distance < 10% | 70% |
-| Liquidation risk medium | Distance < 20% | 40% |
+The AI Agent (OpenClaw) runs independently in the same Telegram group. It can read local `data/*.json` cache files and browse the internet.
 
-Only signals with **confidence ≥ 40%** are shown.
+**Direct mention:**
+```
+@AIBot Is the SOL funding rate good for arbitrage right now?
+→ AI reads local cache + internet, responds with analysis
+```
+
+**Script-assisted (richer context):**
+```
+/deep SOL          → bot formats all SOL data into a context block
+@AIBot Based on the above data, long or short?
+→ AI reasons from the structured context
+```
 
 ---
 
@@ -158,12 +206,12 @@ Only signals with **confidence ≥ 40%** are shown.
 
 | Guard | Behavior |
 |---|---|
-| `AUTONOMOUS_MODE=false` | Shows trade params + directs to manual execution |
+| `AUTONOMOUS_MODE=false` | Inline keyboard confirmation for all trades |
 | `MAX_POSITION_SIZE_USD` | Hard cap per trade |
 | `MAX_DAILY_LOSS_PCT` | Circuit breaker: blocks new positions after daily loss limit |
-| Private key | Lazy-loaded, never written to any file or log |
-| Liquidation alert | Fires at <20% / <10% / <5% distance, persisted in SQLite |
-| Alert deduplication | SQLite-backed, survives scheduler restarts (8h TTL funding, 4h liq, 24h news) |
+| Private key | Lazy-loaded, never written to logs, signed locally |
+| Liquidation alert | Three levels: <20% / <10% / <5% distance, SQLite-persisted |
+| Alert dedup | SQLite-backed with TTL: funding 8h, liq 4h, news 24h |
 
 ---
 
@@ -171,58 +219,15 @@ Only signals with **confidence ≥ 40%** are shown.
 
 | Task | Interval | Description |
 |---|---|---|
-| `fetch` (async) | Every 5 min | HL + Binance + FNG + news concurrent |
-| `funding_alert` | Every 5 min (+60s offset) | Scan after fresh data lands |
-| `liq_alert` | Every 5 min (+60s offset) | Liquidation risk check |
-| `news_check` | Every 15 min | BlockBeats HL-keyword filter |
-| `daily_report` | 08:00 CST | Market + account summary |
-| `weekly_report` | Mon 08:00 CST | Weekly recap |
-| `db_cleanup` | Every 1 hour | Purge expired alert records |
-
----
-
-## Environment Variables
-
-```env
-# Hyperliquid
-HL_PRIVATE_KEY=              # 0x-prefixed EVM private key
-HL_WALLET_ADDRESS=           # Wallet address
-HL_USE_TESTNET=false
-HL_DEFAULT_LEVERAGE=3
-HL_DEFAULT_MARGIN_MODE=cross
-HL_FUNDING_ALERT_THRESHOLD=0.0005
-HL_LIQ_ALERT_THRESHOLD=0.15
-
-# Telegram
-TELEGRAM_BOT_TOKEN=
-TELEGRAM_CHAT_ID=
-TELEGRAM_ALERT_CHAT_ID=      # Optional separate alert channel
-
-# News
-BLOCKBEATS_API_KEY=
-
-# Scheduler
-FETCH_INTERVAL_MIN=5
-NEWS_INTERVAL_MIN=15
-DAILY_REPORT_HOUR=8          # CST hour
-
-# Safety
-AUTONOMOUS_MODE=false
-MAX_POSITION_SIZE_USD=1000
-MAX_DAILY_LOSS_PCT=5         # Circuit breaker: % of account value
-```
-
----
-
-## PM2 Commands
-
-```bash
-pm2 status
-pm2 logs clawie-scheduler
-pm2 logs clawie-bot
-pm2 restart clawie-scheduler
-pm2 save                     # persist across reboots
-```
+| Price fast refresh | Every 60s | Binance prices only, keeps quotes fresh |
+| Full data fetch | Every 5min | HL market + account + FNG + news (async) |
+| Funding alert | Every 5min | Scans after fresh data lands |
+| Liquidation alert | Every 5min | Checks all position distances |
+| News check | Every 15min | BlockBeats HL keyword filter |
+| Focus tracker | Every 5min | Checks focus.json, pushes if interval elapsed |
+| Daily report | 08:00 CST | Market + account summary |
+| Weekly report | Mon 08:00 CST | Weekly recap |
+| DB cleanup | Every 1 hour | Purge expired alert records |
 
 ---
 

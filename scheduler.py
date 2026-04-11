@@ -7,6 +7,7 @@ scheduler.py — 后台调度器
   python scheduler.py                    # 持续运行
   pm2 start scheduler.py --name clawie-scheduler --interpreter python3
 """
+from __future__ import annotations
 
 import os
 import json
@@ -110,6 +111,15 @@ def job_fetch():
         fetcher.fetch_all()
     except Exception as e:
         log.error(f"job_fetch failed: {e}")
+
+
+def job_fetch_prices():
+    """轻量价格刷新：仅 Binance 主流币价格，60s 一次，保留 FNG 不动。"""
+    try:
+        import fetcher
+        fetcher.fetch_prices_fast()
+    except Exception as e:
+        log.error(f"job_fetch_prices failed: {e}")
 
 
 # ── 任务：资金费率预警 ─────────────────────────────────────────────────────────
@@ -593,6 +603,59 @@ def job_check_onchain():
 
 # ── 任务：每日报告 ────────────────────────────────────────────────────────────
 
+def job_focus_check():
+    """
+    检查是否有专项追踪任务（memory/focus.json），
+    若到时间则生成并推送报告。每 5 分钟检查一次。
+    """
+    focus_path = BASE_DIR / "memory" / "focus.json"
+    if not focus_path.exists():
+        return
+
+    try:
+        with open(focus_path) as f:
+            focus = json.load(f)
+    except Exception:
+        return
+
+    token        = focus.get("token", "BTC")
+    interval_min = int(focus.get("interval_min", 15))
+    chat_id      = focus.get("chat_id") or CHAT_ID
+    topic_id     = focus.get("topic_id")
+
+    # 检查距上次报告是否已过 interval_min 分钟
+    last_path = BASE_DIR / "memory" / "focus_last.json"
+    if last_path.exists():
+        try:
+            with open(last_path) as f:
+                last_data = json.load(f)
+            last_ts  = datetime.fromisoformat(last_data["time"])
+            if last_ts.tzinfo is None:
+                last_ts = last_ts.replace(tzinfo=timezone.utc)
+            elapsed  = (datetime.now(timezone.utc) - last_ts).total_seconds() / 60
+            if elapsed < interval_min:
+                return
+        except Exception:
+            pass  # 解析失败就当作从未生成过
+
+    # 生成报告
+    try:
+        from skills.focus import FocusSkill
+        skill  = FocusSkill(DATA_DIR, BASE_DIR / "memory", {})
+        result = skill.run(action="report", token=token)
+        if result.get("success"):
+            send_telegram(result["text"], chat_id=chat_id, thread_id=topic_id)
+        else:
+            log.warning(f"focus_check: report failed: {result.get('text')}")
+
+        # 更新上次报告时间（无论成功失败都更新，避免频繁重试）
+        with open(last_path, "w") as f:
+            json.dump({"time": datetime.now(timezone.utc).isoformat(), "token": token}, f)
+
+    except Exception as e:
+        log.error(f"job_focus_check failed: {e}", exc_info=True)
+
+
 def job_daily_report():
     try:
         from skills.crypto_report import CryptoReportSkill
@@ -626,9 +689,13 @@ def main():
 
     scheduler = BlockingScheduler(timezone="UTC")
 
-    # 数据抓取：立即执行第一次
+    # 数据抓取：立即执行第一次（全量：价格 + FNG + 资金费率 + 账户）
     scheduler.add_job(job_fetch, IntervalTrigger(minutes=FETCH_INTERVAL), id="fetch",
                       next_run_time=datetime.now(timezone.utc))
+
+    # 快速价格刷新：60s 一次，仅更新 Binance 价格（FNG/资金费率/账户不变）
+    scheduler.add_job(job_fetch_prices, IntervalTrigger(seconds=60), id="price_refresh",
+                      next_run_time=datetime.now(timezone.utc) + timedelta(seconds=10))
 
     # 预警扫描：在 fetch 后 60s 启动，确保使用最新数据
     alert_start = datetime.now(timezone.utc) + timedelta(seconds=60)
@@ -653,6 +720,10 @@ def main():
     # 回测历史数据收集：每 8 小时一次
     scheduler.add_job(job_collect_backtest_data, IntervalTrigger(hours=8),
                       id="backtest_collect")
+
+    # 专项追踪报告：每 5 分钟检查，到时间则推送
+    scheduler.add_job(job_focus_check, IntervalTrigger(minutes=5), id="focus_check",
+                      next_run_time=datetime.now(timezone.utc) + timedelta(seconds=30))
 
     # 每小时清理过期预警记录
     scheduler.add_job(db.clear_expired, IntervalTrigger(hours=1), id="db_cleanup")
@@ -684,7 +755,9 @@ def main():
     else:
         log.info("  Onchain monitor: no watchlist yet (use /watch add to start)")
 
-    log.info(f"  Data fetch:      every {FETCH_INTERVAL} min")
+    log.info(f"  Data fetch:      every {FETCH_INTERVAL} min (full)")
+    log.info(f"  Price refresh:   every 60s (Binance prices only)")
+    log.info(f"  Focus check:     every 5 min")
     log.info(f"  News check:      every {NEWS_INTERVAL} min")
     log.info(f"  Backtest data:   every 8h")
     log.info(f"  Daily report:    {DAILY_REPORT_HOUR}:00 CST")

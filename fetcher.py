@@ -9,6 +9,7 @@ fetcher.py — 异步数据抓取器
   python fetcher.py --task market_snapshot
   python fetcher.py --task news
 """
+from __future__ import annotations
 
 import os
 import sys
@@ -305,10 +306,55 @@ async def _fetch_all_async():
     log.info(f"=== Full fetch done in {time.time() - t0:.1f}s ===")
 
 
+# ── 快速价格刷新（仅 Binance，60s 间隔） ────────────────────────────────────────
+
+async def _fetch_prices_fast_async(session: aiohttp.ClientSession) -> dict:
+    """仅抓取 Binance 主流币价格，保留 FNG 不动。用于 60s 快速刷新。"""
+    pairs  = {s + "USDT" for s in WATCHED_SYMBOLS}
+    ticker = await _get(session, f"{BINANCE_SPOT_URL}/ticker/24hr")
+
+    prices = {}
+    if ticker:
+        for t in ticker:
+            if t["symbol"] in pairs:
+                coin = t["symbol"].replace("USDT", "")
+                prices[coin] = {
+                    "price":       float(t["lastPrice"]),
+                    "change_24h":  float(t["priceChangePercent"]),
+                    "volume_usdt": float(t["quoteVolume"]),
+                }
+
+    if not prices:
+        log.warning("fetch_prices_fast: Binance returned no data")
+        return {}
+
+    # 读取现有快照，保留 FNG（FNG API 限流严格，不在快速刷新中调用）
+    snap_path = DATA_DIR / "market_snapshot.json"
+    existing: dict = {}
+    if snap_path.exists():
+        try:
+            with open(snap_path) as f:
+                raw = json.load(f)
+            existing = raw.get("data", raw) if isinstance(raw, dict) else {}
+        except Exception:
+            pass
+
+    data = {**existing, "prices": prices}
+    _save("market_snapshot.json", data)
+    return data
+
+
 # ── 公共同步接口（向后兼容：scheduler.py 中 import fetcher; fetcher.fetch_all()）─
 
 def fetch_all():
     asyncio.run(_fetch_all_async())
+
+def fetch_prices_fast() -> dict:
+    """60s 快速价格刷新：仅 Binance 价格，保留 FNG。"""
+    async def _run():
+        async with aiohttp.ClientSession() as s:
+            return await _fetch_prices_fast_async(s)
+    return asyncio.run(_run())
 
 def fetch_hl_market() -> dict:
     async def _run():
