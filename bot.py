@@ -823,15 +823,21 @@ def _route(chat_id: int, cmd: str, args: list, thread_id: int = None):
         send(chat_id, r["text"], thread_id=_tid(TOPIC_MARKET))
 
     # ── 做市商阶段分析 ────────────────────────────────────────────────────────
+    # /mm              — 全市场扫描（HL 快速）
+    # /mm BTC          — BTC 跨所综合分析（Binance+OKX+Bybit+HL）
+    # /mm BTC cross    — 只看跨所费率/OI 分布，不算综合评分
     elif cmd in ("mm", "phase", "阶段"):
-        sub = args[0].upper() if args else None
+        sub  = args[0].upper() if args else None
+        sub2 = args[1].lower() if len(args) > 1 else None
 
-        if sub in ("scan", "all", "全局") or not sub:
-            send(chat_id, "🕵️ 正在扫描做市商阶段...", thread_id=_tid(TOPIC_MARKET))
+        if sub in ("SCAN", "ALL", "全局") or not sub:
+            send(chat_id, "🕵️ 正在扫描做市商阶段（HL）...", thread_id=_tid(TOPIC_MARKET))
             r = skill("mm_analysis").run(action="scan")
+        elif sub2 in ("cross", "跨所"):
+            send(chat_id, f"🌐 正在抓取 {sub} 跨所数据...", thread_id=_tid(TOPIC_MARKET))
+            r = skill("mm_analysis").run(action="cross", symbol=sub)
         else:
-            # /mm SOL — 分析指定币种
-            send(chat_id, f"🕵️ 正在分析 {sub} 做市商阶段...", thread_id=_tid(TOPIC_MARKET))
+            send(chat_id, f"🕵️ 正在分析 {sub} 跨所做市商阶段...", thread_id=_tid(TOPIC_MARKET))
             r = skill("mm_analysis").run(action="analyze", symbol=sub)
 
         send(chat_id, r["text"], thread_id=_tid(TOPIC_MARKET))
@@ -1246,7 +1252,7 @@ def register_commands():
         {"command": "agent",     "description": "Agent 分析 — /agent scan | status | history"},
         {"command": "netflow",   "description": "交易所净流量 — /netflow [24h] | signal BTC | wallets"},
         {"command": "track",     "description": "专项追踪 — /track SOL [15min] | report | cancel"},
-        {"command": "mm",        "description": "做市商阶段分析 — /mm SOL | /mm scan"},
+        {"command": "mm",        "description": "做市商分析 — /mm BTC（跨所综合）| /mm BTC cross | /mm scan"},
         {"command": "strategy",  "description": "策略向导 — /strategy new | show | on | off"},
         {"command": "ask",    "description": "整理市场数据上下文 — /ask 现在 SOL 适合做多吗？"},
         {"command": "deep",   "description": "整理币种深度数据 — /deep BTC（MM阶段+跨所费率）"},
