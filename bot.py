@@ -555,7 +555,8 @@ def _route(chat_id: int, cmd: str, args: list, thread_id: int = None):
 
     # ── 信号 ─────────────────────────────────────────────────────────────────
     elif cmd in ("alerts", "alert", "signals", "信号"):
-        r = skill("crypto_alert").run(action="scan")
+        send(chat_id, "🤖 正在扫描市场...", thread_id=_tid(TOPIC_ALERT))
+        r = skill("agent_trade").run(action="analyze")
         send(chat_id, r["text"], thread_id=_tid(TOPIC_ALERT))
 
     # ── 报告 ─────────────────────────────────────────────────────────────────

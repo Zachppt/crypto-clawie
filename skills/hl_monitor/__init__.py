@@ -2,8 +2,50 @@
 skills/hl_monitor — Hyperliquid 市场监控
 功能：资金费率排行、未平仓量变化、账户持仓、爆仓风险评估
 """
+from __future__ import annotations
 
+import requests
 from skills.base import BaseSkill
+
+_HL_API = "https://api.hyperliquid.xyz/info"
+_LIVE_STALE_MIN = 5   # 缓存超过 5 分钟则回落实时 API
+
+
+def _fetch_live_hl_asset(symbol: str) -> dict | None:
+    """直接调用 HL API 获取单个资产实时数据（缓存过期时使用）。"""
+    try:
+        r = requests.post(
+            _HL_API,
+            json={"type": "metaAndAssetCtxs"},
+            timeout=6,
+            headers={"Content-Type": "application/json"},
+        )
+        r.raise_for_status()
+        result = r.json()
+        if not result or len(result) < 2:
+            return None
+        universe, ctxs = result[0].get("universe", []), result[1]
+        for i, asset in enumerate(universe):
+            if asset["name"] == symbol.upper() and i < len(ctxs):
+                ctx      = ctxs[i]
+                funding  = float(ctx.get("funding", 0))
+                mark_px  = float(ctx.get("markPx") or ctx.get("midPx") or 0)
+                prev_day = ctx.get("prevDayPx")
+                chg = (
+                    (mark_px - float(prev_day)) / float(prev_day) * 100
+                    if prev_day and float(prev_day) else 0
+                )
+                return {
+                    "symbol":             symbol.upper(),
+                    "mark_price":         mark_px,
+                    "change_24h_pct":     round(chg, 2),
+                    "funding_8h":         funding,
+                    "funding_annualized": round(funding * 3 * 365 * 100, 2),
+                    "open_interest":      float(ctx.get("openInterest", 0)),
+                    "_live":              True,
+                }
+    except Exception:
+        return None
 
 
 class HLMonitorSkill(BaseSkill):
@@ -65,25 +107,35 @@ class HLMonitorSkill(BaseSkill):
     # ── 资金费率详情 ──────────────────────────────────────────────────────────
 
     def _funding_rates(self, symbol: str = None, top: int = 20, **_) -> dict:
+        age    = self.data_age_minutes("hl_market.json")
         market = self.load("hl_market.json")
-        if not market:
-            return self.err("HL 市场数据未缓存")
+        stale  = age > _LIVE_STALE_MIN
 
-        assets = market.get("assets", [])
-
+        # ── 指定币种：缓存过期则回落实时 API ────────────────────────────────
         if symbol:
             sym_upper = symbol.upper()
-            asset = next((a for a in assets if a["symbol"] == sym_upper), None)
+            asset     = None
+
+            if stale:
+                asset = _fetch_live_hl_asset(sym_upper)
+
+            if asset is None:
+                if not market:
+                    return self.err("HL 市场数据未缓存，且实时 API 请求失败")
+                asset = next((a for a in market.get("assets", []) if a["symbol"] == sym_upper), None)
+
             if not asset:
                 return self.err(f"未找到 {sym_upper} 的数据")
-            rate  = asset["funding_8h"]
-            ann   = asset["funding_annualized"]
-            price = asset["mark_price"]
+
+            rate      = asset["funding_8h"]
+            ann       = asset["funding_annualized"]
+            price     = asset["mark_price"]
             direction = "多头付空头（做多有成本）" if rate > 0 else "空头付多头（做空有成本）"
-            lvl = "🔴 极端" if abs(rate) >= 0.001 else "🟡 偏高" if abs(rate) >= 0.0005 else "🟢 正常"
-            oi_usd = asset.get("open_interest", 0) * price
+            lvl       = "🔴 极端" if abs(rate) >= 0.001 else "🟡 偏高" if abs(rate) >= 0.0005 else "🟢 正常"
+            oi_usd    = asset.get("open_interest", 0) * price
+            live_tag  = " _✨ 实时_" if asset.get("_live") else f" _（{age:.0f}min 前）_"
             text = (
-                f"💹 *{sym_upper}*\n"
+                f"💹 *{sym_upper}*{live_tag}\n"
                 f"价格：`${price:,.2f}` | 24h：`{asset['change_24h_pct']:+.2f}%`\n"
                 f"资金费率(8h)：`{rate*100:+.4f}%` {lvl}\n"
                 f"方向：{direction}\n"
@@ -92,15 +144,20 @@ class HLMonitorSkill(BaseSkill):
             )
             return self.ok(text, data=asset)
 
-        # 全市场排行
+        # ── 全市场排行：用缓存（全量实时太重）────────────────────────────────
+        if not market:
+            return self.err("HL 市场数据未缓存")
+
+        assets        = market.get("assets", [])
         sorted_assets = sorted(assets, key=lambda x: abs(x["funding_8h"]), reverse=True)[:top]
-        lines = [f"💹 *资金费率排行 Top {top}*\n"]
+        stale_tag     = f"\n⚠️ _数据更新于 {age:.0f} 分钟前_" if stale else ""
+        lines         = [f"💹 *资金费率排行 Top {top}*\n"]
         for a in sorted_assets:
             rate  = a["funding_8h"]
             emoji = "🔴" if abs(rate) >= 0.001 else "🟡" if abs(rate) >= 0.0005 else "🟢"
             lines.append(f"{emoji} `{a['symbol']:6s}` {rate*100:+.4f}%/8h | 年化 {a['funding_annualized']:+.1f}%")
 
-        return self.ok("\n".join(lines), data={"top_funding": sorted_assets})
+        return self.ok("\n".join(lines) + stale_tag, data={"top_funding": sorted_assets})
 
     # ── 未平仓量 ──────────────────────────────────────────────────────────────
 
