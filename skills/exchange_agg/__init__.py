@@ -1,10 +1,13 @@
 """
 skills/exchange_agg — 多交易所聚合行情与资金费率
-使用 ccxt 统一接入 Binance / OKX / Bybit / Gate.io / Bitget（均无需 API Key）。
-Hyperliquid 仍读本地缓存 hl_market.json（原生 SDK，不走 ccxt）。
+数据来源：
+  - Binance / OKX / Bybit / Gate.io / Bitget — ccxt 统一接口（无需 API Key）
+  - Hyperliquid — 公开 REST API 实时获取（无需缓存文件）
 """
 from __future__ import annotations
 
+import time
+import requests as _req
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from skills.base import BaseSkill
 
@@ -19,14 +22,64 @@ _CCXT_NAME = {
     "Bitget":  "bitget",
 }
 
-# 各交易所合约类型（ccxt options.defaultType）
 _PERP_TYPE = {
-    "binance": "future",   # USDM Futures
+    "binance": "future",
     "okx":     "swap",
     "bybit":   "linear",
     "gateio":  "swap",
     "bitget":  "swap",
 }
+
+# ── Hyperliquid 实时缓存（进程内 TTL 10s，同一命令内只请求一次）──────────────
+
+_hl_cache: dict[str, dict] = {}   # {SYMBOL: {"price": float, "funding": float}}
+_hl_cache_ts: float = 0.0
+
+def _hl_refresh() -> None:
+    global _hl_cache, _hl_cache_ts
+    if time.time() - _hl_cache_ts < 10:
+        return
+    try:
+        r = _req.post(
+            "https://api.hyperliquid.xyz/info",
+            json={"type": "metaAndAssetCtxs"},
+            timeout=7,
+            headers={"Content-Type": "application/json"},
+        )
+        r.raise_for_status()
+        result = r.json()
+        if not result or len(result) < 2:
+            return
+        universe, ctxs = result[0].get("universe", []), result[1]
+        cache: dict[str, dict] = {}
+        for i, asset in enumerate(universe):
+            if i >= len(ctxs):
+                break
+            ctx  = ctxs[i]
+            mark = float(ctx.get("markPx") or ctx.get("midPx") or 0)
+            cache[asset["name"]] = {
+                "price":   mark,
+                "funding": float(ctx.get("funding", 0)),
+            }
+        _hl_cache    = cache
+        _hl_cache_ts = time.time()
+    except Exception:
+        pass
+
+
+def _hl_price(symbol: str, _=None) -> float | None:
+    """取 HL 实时标记价格（第二参数兼容旧调用，忽略）。"""
+    _hl_refresh()
+    d = _hl_cache.get(symbol.upper())
+    p = d["price"] if d else None
+    return p if p else None
+
+
+def _hl_funding(symbol: str, _=None) -> float | None:
+    """取 HL 实时资金费率（第二参数兼容旧调用，忽略）。"""
+    _hl_refresh()
+    d = _hl_cache.get(symbol.upper())
+    return d["funding"] if d is not None else None
 
 
 # ── ccxt 工厂 ──────────────────────────────────────────────────────────────────
@@ -41,7 +94,7 @@ def _perp_ex(name: str):
     return getattr(ccxt, name)({"options": {"defaultType": _PERP_TYPE[name]}, "timeout": 8000})
 
 
-# ── 单交易所取数函数（返回 (label, value | None)） ────────────────────────────
+# ── 单交易所取数函数（返回 (label, value | None)）────────────────────────────
 
 def _fetch_spot_price(label: str, symbol: str) -> tuple[str, float | None]:
     try:
@@ -81,13 +134,25 @@ def _fetch_perp_volume(label: str, symbol: str) -> tuple[str, float | None]:
         return label, None
 
 
+# ── 带键值的并行辅助（供跨类型并行使用）─────────────────────────────────────
+
+def _keyed_spot_price(label: str, symbol: str) -> tuple[str, float | None]:
+    _, v = _fetch_spot_price(label, symbol)
+    return f"p:{label}", v
+
+
+def _keyed_spot_volume(label: str, symbol: str) -> tuple[str, float | None]:
+    _, v = _fetch_spot_volume(label, symbol)
+    return f"v:{label}", v
+
+
 # ── 并行执行 ───────────────────────────────────────────────────────────────────
 
-def _parallel(tasks: list, workers: int = 8, timeout: float = 12) -> dict:
+def _parallel(tasks: list, workers: int = 10, timeout: float = 15) -> dict:
     """
     tasks: [(callable, arg1, arg2, ...), ...]
-    每个 callable 返回 (key, value)。
-    返回 {key: value}（跳过异常的任务）。
+    callable 返回 (key, value)。
+    返回 {key: value}（忽略异常任务）。
     """
     results: dict = {}
     with ThreadPoolExecutor(max_workers=workers) as pool:
@@ -101,30 +166,10 @@ def _parallel(tasks: list, workers: int = 8, timeout: float = 12) -> dict:
     return results
 
 
-# ── Hyperliquid 缓存辅助 ───────────────────────────────────────────────────────
-
-def _hl_price(symbol: str, market_cache: dict) -> float | None:
-    if not market_cache:
-        return None
-    for a in market_cache.get("assets", []):
-        if a["symbol"] == symbol:
-            return a["mark_price"]
-    return None
-
-
-def _hl_funding(symbol: str, market_cache: dict) -> float | None:
-    if not market_cache:
-        return None
-    for a in market_cache.get("assets", []):
-        if a["symbol"] == symbol:
-            return a["funding_8h"]
-    return None
-
-
 # ── 上架情况行格式化 ───────────────────────────────────────────────────────────
 
 def _listing_line(label: str, found: dict[str, bool], all_exchanges: list[str]) -> str:
-    parts = [("✅" if found.get(ex) else "❌") + ex for ex in all_exchanges]
+    parts  = [("✅" if found.get(ex) else "❌") + ex for ex in all_exchanges]
     listed = sum(1 for v in found.values() if v)
     return f"_{label}：{' | '.join(parts)}（{listed}/{len(all_exchanges)}）_"
 
@@ -147,66 +192,80 @@ class ExchangeAggSkill(BaseSkill):
             return self.err(f"未知操作：{action}。可用：compare / funding / divergence / volume / listings")
         return fn(symbol=symbol, **kwargs)
 
-    # ── 跨所价格对比 ──────────────────────────────────────────────────────────
+    # ── 跨所价格对比（含成交量）──────────────────────────────────────────────
 
     def _compare(self, symbol: str = "BTC", **_) -> dict:
-        market = self.load("hl_market.json")
+        # 并行：现货价格 + 现货成交量（10个请求，约3-4s）
+        tasks = (
+            [(_keyed_spot_price,  label, symbol) for label in SPOT_EXCHANGES] +
+            [(_keyed_spot_volume, label, symbol) for label in SPOT_EXCHANGES]
+        )
+        results = _parallel(tasks, workers=10)
 
-        # 并行抓取各所现货价格
-        tasks       = [(_fetch_spot_price, label, symbol) for label in SPOT_EXCHANGES]
-        spot_prices = _parallel(tasks)
+        spot_prices = {label: results.get(f"p:{label}") for label in SPOT_EXCHANGES}
+        spot_vols   = {label: results.get(f"v:{label}") for label in SPOT_EXCHANGES}
 
-        hl_px     = _hl_price(symbol, market)
-        all_prices = {**spot_prices, "Hyperliquid": hl_px}
-        prices    = {k: v for k, v in all_prices.items() if v is not None}
-        spot_ok   = {ex: (spot_prices.get(ex) is not None) for ex in SPOT_EXCHANGES}
+        hl_px      = _hl_price(symbol)
+        all_prices = {k: v for k, v in spot_prices.items() if v is not None}
+        if hl_px:
+            all_prices["Hyperliquid"] = hl_px
+        spot_ok = {ex: (spot_prices.get(ex) is not None) for ex in SPOT_EXCHANGES}
 
-        if not prices:
-            return self.err(f"所有交易所均无法获取 {symbol} 价格，请检查网络或确认币种名称")
+        if not all_prices:
+            return self.err(f"所有交易所均无法获取 {symbol} 价格")
 
-        avg   = sum(prices.values()) / len(prices)
-        max_p = max(prices.values())
-        min_p = min(prices.values())
+        avg   = sum(all_prices.values()) / len(all_prices)
+        max_p = max(all_prices.values())
+        min_p = min(all_prices.values())
 
-        lines = [f"📊 *{symbol} 跨所价格对比*\n"]
-        for ex, price in sorted(prices.items(), key=lambda x: x[1], reverse=True):
+        lines = [f"📊 *{symbol} 跨所对比*\n"]
+
+        # ── 价格 ──────────────────────────────────────────────────────────────
+        lines.append("*价格*")
+        for ex, price in sorted(all_prices.items(), key=lambda x: x[1], reverse=True):
             diff_pct = (price - avg) / avg * 100
             sign     = "+" if diff_pct >= 0 else ""
-            marker   = " ⬆️" if price == max_p and len(prices) > 1 else (
-                       " ⬇️" if price == min_p and len(prices) > 1 else "")
+            marker   = " ⬆️" if price == max_p and len(all_prices) > 1 else (
+                       " ⬇️" if price == min_p and len(all_prices) > 1 else "")
             lines.append(f"• *{ex}*：`${price:,.2f}` ({sign}{diff_pct:.3f}%){marker}")
 
-        if len(prices) > 1:
-            spread     = max_p - min_p
-            spread_pct = spread / avg * 100
-            high_ex    = max(prices, key=prices.get)
-            low_ex     = min(prices, key=prices.get)
-            lines.append(f"\n最大价差：`${spread:.2f}` ({spread_pct:.3f}%) [{high_ex} vs {low_ex}]")
-            if spread_pct >= 0.1:
-                lines.append("⚡ _价差较大，可能存在套利机会或数据延迟_")
+        spread     = (max_p - min_p) / avg * 100
+        high_ex    = max(all_prices, key=all_prices.get)
+        low_ex     = min(all_prices, key=all_prices.get)
+        lines.append(f"\n价差：`{spread:.3f}%` [{high_ex} vs {low_ex}]")
+        if spread >= 0.1:
+            lines.append("⚡ _价差较大，可能存在套利机会_")
 
+        # ── 成交量 ────────────────────────────────────────────────────────────
+        valid_vols = {k: v for k, v in spot_vols.items() if v}
+        if valid_vols:
+            total_vol = sum(valid_vols.values())
+            lines.append("\n*24h 现货成交量*")
+            for ex, vol in sorted(valid_vols.items(), key=lambda x: x[1], reverse=True):
+                share = vol / total_vol * 100 if total_vol else 0
+                lines.append(f"• *{ex}*：`${vol/1e9:.2f}B` ({share:.1f}%)")
+            lines.append(f"合计：`${total_vol/1e9:.2f}B`")
+
+        # ── 上架状态 ──────────────────────────────────────────────────────────
         lines.append("")
         lines.append(_listing_line("现货上架", spot_ok, SPOT_EXCHANGES))
-        hl_listed = hl_px is not None
-        lines.append(f"_合约 Hyperliquid：{'✅ 有永续合约' if hl_listed else '❌ 无永续合约'}_")
+        lines.append(f"_合约 Hyperliquid：{'✅ 有永续合约' if hl_px else '❌ 无永续合约'}_")
 
         return self.ok("\n".join(lines), data={
-            "prices":      prices,
+            "prices":      all_prices,
+            "volumes":     valid_vols,
             "avg":         avg,
             "spot_listed": [ex for ex, ok in spot_ok.items() if ok],
-            "hl_listed":   hl_listed,
+            "hl_listed":   hl_px is not None,
         })
 
     # ── 跨所资金费率对比 ──────────────────────────────────────────────────────
 
     def _funding_compare(self, symbol: str = "BTC", **_) -> dict:
-        market = self.load("hl_market.json")
-
         tasks = [(_fetch_perp_funding, label, symbol) for label in SPOT_EXCHANGES]
         rates = _parallel(tasks)
 
-        # 加入 HL 缓存
-        hl_rate = _hl_funding(symbol, market)
+        hl_rate = _hl_funding(symbol)
         if hl_rate is not None:
             rates["Hyperliquid"] = hl_rate
 
@@ -248,11 +307,12 @@ class ExchangeAggSkill(BaseSkill):
     # ── 价差异动扫描 ──────────────────────────────────────────────────────────
 
     def _divergence(self, symbol: str = "BTC", threshold_pct: float = 0.15, **_) -> dict:
-        """扫描主流币跨所价差，找出超过阈值的异动。"""
         scan_symbols   = ["BTC", "ETH", "SOL", "BNB", "XRP", "DOGE", "AVAX", "ARB"]
-        scan_exchanges = ["Binance", "OKX", "Bitget"]  # 3 所足够快，避免 timeout
-        market  = self.load("hl_market.json")
-        hl_map  = {a["symbol"]: a["mark_price"] for a in (market or {}).get("assets", [])}
+        scan_exchanges = ["Binance", "OKX", "Bitget"]
+
+        # HL 实时价格（一次批量刷新）
+        _hl_refresh()
+        hl_map = {sym: d["price"] for sym, d in _hl_cache.items() if d["price"]}
 
         def _keyed(sym: str, label: str) -> tuple[tuple, float | None]:
             _, v = _fetch_spot_price(label, sym)
@@ -273,7 +333,6 @@ class ExchangeAggSkill(BaseSkill):
                 except Exception:
                     pass
 
-        # 加入 HL 价格
         for sym in scan_symbols:
             if sym in hl_map:
                 sym_prices[sym]["HL"] = hl_map[sym]
@@ -311,7 +370,7 @@ class ExchangeAggSkill(BaseSkill):
 
         return self.ok("\n".join(lines), data={"divergences": divergences})
 
-    # ── 成交量对比 ────────────────────────────────────────────────────────────
+    # ── 成交量对比（内部保留，/compare 已包含此数据）─────────────────────────
 
     def _volume(self, symbol: str = "BTC", **_) -> dict:
         spot_tasks = [(_fetch_spot_volume, label, symbol) for label in SPOT_EXCHANGES]
@@ -350,8 +409,6 @@ class ExchangeAggSkill(BaseSkill):
     # ── 上架情况查询 ──────────────────────────────────────────────────────────
 
     def _listings(self, symbol: str = "BTC", **_) -> dict:
-        market = self.load("hl_market.json")
-
         spot_tasks = [(_fetch_spot_price,   label, symbol) for label in SPOT_EXCHANGES]
         perp_tasks = [(_fetch_perp_funding, label, symbol) for label in SPOT_EXCHANGES]
 
@@ -371,7 +428,7 @@ class ExchangeAggSkill(BaseSkill):
                 except Exception:
                     pass
 
-        hl_rate = _hl_funding(symbol, market)
+        hl_rate = _hl_funding(symbol)
         perp_results["Hyperliquid"] = hl_rate
 
         spot_listed = [ex for ex, v in spot_results.items() if v is not None]

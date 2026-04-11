@@ -8,10 +8,10 @@ bot.py — Telegram 指令机器人
     /liq               — 爆仓风险评估
 
   市场（跨所，数据来源：Binance/OKX/Bybit/HL）
-    /market            — 跨所行情 + 恐慌贪婪 + HL 账户摘要
+    /market            — 跨所行情 + 恐慌贪婪指数（无需配置）
     /funding BTC       — 跨所资金费率对比（Binance/OKX/Bybit/HL）
-    /oi                — HL 未平仓量排行 Top 10
-    /oi BTC            — 指定币种 OI
+    /oi                — Hyperliquid 全市场 OI 排行 Top 10
+    /oi BTC            — 重定向到 /mm BTC（OI 是 MM 分析的子集）
 
   行情
     /price BTC         — 实时价格（WebSocket/Binance 优先）
@@ -35,7 +35,7 @@ bot.py — Telegram 指令机器人
 
   数据上下文整理（配合群组内 AI Agent 使用）
     /ask <问题>        — 整理市场数据 + 附问题，@AI Agent 分析
-    /deep <TOKEN>      — 整理币种深度数据（MM 阶段 + 跨所费率）
+    /deep <TOKEN>      — 整理币种深度数据（MM 阶段 + 跨所费率 + TA信号）
     /advice            — 整理当前持仓数据，@AI Agent 给建议
 """
 
@@ -276,8 +276,8 @@ HELP_TEXT = r"""🤖 *Clawie 指令列表*
 *市场行情（无需配置，跨所实时）*
 /market — 主流币跨所价格 + 恐慌贪婪指数
 /funding BTC — Binance/OKX/Bybit/HL 资金费率对比
-/oi — 未平仓量排行（HL 全市场）
-/oi BTC — 指定币种跨所 OI 分布
+/oi — Hyperliquid 全市场 OI 排行 Top 10
+/oi BTC — 重定向到 /mm BTC（OI 是 MM 分析的子集）
 
 *行情*
 /price — 实时价格（WebSocket/Binance 优先）
@@ -315,27 +315,25 @@ HELP_TEXT = r"""🤖 *Clawie 指令列表*
 /autotrade off — 关闭自动交易
 
 *多交易所聚合*
-/compare BTC — 跨所价格对比（Binance/OKX/Bybit/Gate/HL）
-/divergence — 扫描主流币跨所价差
-/vol BTC — 跨所成交量对比
+/compare BTC — 跨所价格 + 成交量 + 价差（含 HL）
+/divergence — 扫描主流币跨所价差异动
 /listings SOL — 上架情况（现货+合约各所）
-（/exfunding 是 /funding 的别名，效果相同）
 
-*做市商分析（跨所）*
-/mm BTC — BTC 跨所做市商综合评分（Binance+OKX+Bybit+HL）
-/mm BTC cross — 只看跨所费率/OI 分布
-/mm scan — 全市场快扫（HL 数据）
+*做市商分析（跨所：Binance + OKX + Bybit + HL）*
+/mm BTC — 跨所综合评分（资金费率 + OI 分布 + 阶段判断）
+/mm BTC cross — 只看跨所数据（不含阶段评分）
+/mm scan — 全市场快扫
 
-*Agent 智能交易*
-/agent status — Agent 状态与近期决策
-/agent decide — 生成下一步决策
+*Agent 智能交易（数据源：Binance 永续 API 实时）*
+/alerts — 全市场多因子扫描（费率+成交量+动量+OKX确认）
+/agent status — Agent 评分权重与近期决策
+/agent decide — 生成下一步可执行决策
 /agent history — 历史决策记录
-/agent scan — 等同于 /alerts
 
-*数据上下文整理（配合 AI Agent 使用）*
-/ask 现在 SOL 适合做多吗？ — 整理市场数据 + 附问题，供 @AI Agent 分析
-/deep BTC — 整理指定币种深度数据（MM 阶段 + 跨所费率）
-/advice — 整理当前持仓数据，供 @AI Agent 给出操作建议
+*数据整理（配合 AI Agent 使用）*
+/ask 现在 SOL 适合做多吗？ — 整理市场数据 + 问题，供 @AI Agent 分析
+/deep BTC — 深度数据（MM 阶段 + 跨所费率 + 技术信号）
+/advice — 整理持仓数据，供 @AI Agent 给出操作建议
 
 *专项追踪*
 /track SOL — 开始追踪 SOL，每 15 分钟自动推送报告
@@ -603,15 +601,18 @@ def _route(chat_id: int, cmd: str, args: list, thread_id: int = None):
         send(chat_id, r["text"], thread_id=_tid(TOPIC_MARKET))
 
     elif cmd == "oi":
+        # /oi        — 全市场 OI 排行（HL 缓存，最全）
+        # /oi BTC    — 提示用 /mm BTC，OI 已包含在 MM 分析中
         symbol = args[0].upper() if args else None
         if symbol:
-            # 指定币种：跨所 OI 分布（Binance + OKX + Bybit + HL）
-            send(chat_id, f"⏳ 正在抓取 {symbol} 跨所 OI 数据...", thread_id=_tid(TOPIC_MARKET))
-            r = skill("mm_analysis").run(action="cross", symbol=symbol)
+            send(chat_id,
+                 f"💡 `/oi {symbol}` 的 OI 数据已包含在做市商分析中：\n\n"
+                 f"`/mm {symbol}` — 跨所 OI 分布 + 资金费率 + 阶段判断\n"
+                 f"`/mm {symbol} cross` — 只看跨所数据（不含阶段评分）",
+                 thread_id=_tid(TOPIC_MARKET))
         else:
-            # 全市场排行：HL 缓存最全，速度最快
             r = skill("hl_monitor").run(action="oi")
-        send(chat_id, r["text"], thread_id=_tid(TOPIC_MARKET))
+            send(chat_id, r["text"], thread_id=_tid(TOPIC_MARKET))
 
     # ── 行情 ─────────────────────────────────────────────────────────────────
     elif cmd == "price":
@@ -1045,8 +1046,10 @@ def _route(chat_id: int, cmd: str, args: list, thread_id: int = None):
         send(chat_id, r["text"], thread_id=_tid(TOPIC_MARKET))
 
     elif cmd in ("vol", "volume", "成交量"):
+        # 成交量已合并进 /compare，这里做透明重定向
         sym = args[0].upper() if args else "BTC"
-        r   = skill("exchange_agg").run(action="volume", symbol=sym)
+        send(chat_id, f"⏳ 正在获取 {sym} 跨所数据（含成交量）...", thread_id=_tid(TOPIC_MARKET))
+        r   = skill("exchange_agg").run(action="compare", symbol=sym)
         send(chat_id, r["text"], thread_id=_tid(TOPIC_MARKET))
 
     elif cmd in ("divergence", "div", "价差"):
@@ -1111,16 +1114,20 @@ def _route(chat_id: int, cmd: str, args: list, thread_id: int = None):
         if not question:
             send(chat_id, "❓ 请提供问题，例如：`/ask 现在 SOL 适合做多吗？`", thread_id=_tid(TOPIC_MARKET))
             return
+        send(chat_id, "⏳ 正在整理市场数据...", thread_id=_tid(TOPIC_MARKET))
         r = skill("ai_agent").run(action="ask", question=question)
         send(chat_id, r["text"], thread_id=_tid(TOPIC_MARKET))
 
     elif cmd in ("deep", "深度"):
         sym = args[0].upper() if args else "BTC"
-        send(chat_id, f"⏳ 正在整理 {sym} 深度数据...", thread_id=_tid(TOPIC_MARKET))
+        send(chat_id, f"⏳ 正在整理 {sym} 深度数据（MM + 跨所费率 + 技术信号）...",
+             thread_id=_tid(TOPIC_MARKET))
         r = skill("ai_agent").run(action="deep", symbol=sym)
         send(chat_id, r["text"], thread_id=_tid(TOPIC_MARKET))
 
+    # /advice 是 /ask 的持仓专项版本，自动附上持仓上下文
     elif cmd in ("advice", "建议"):
+        send(chat_id, "⏳ 正在整理持仓数据...", thread_id=_tid(TOPIC_TRADE))
         r = skill("ai_agent").run(action="advice")
         send(chat_id, r["text"], thread_id=_tid(TOPIC_TRADE))
 
@@ -1322,39 +1329,37 @@ def _route(chat_id: int, cmd: str, args: list, thread_id: int = None):
 
 def register_commands():
     our_commands = [
-        {"command": "market",   "description": "跨所行情+恐慌贪婪+HL账户摘要"},
-        {"command": "position", "description": "我的持仓明细和余额"},
-        {"command": "funding",  "description": "跨所资金费率对比，/funding BTC 查指定币种"},
-        {"command": "oi",       "description": "未平仓量排行，/oi BTC 查指定币种"},
-        {"command": "liq",      "description": "爆仓风险评估"},
-        {"command": "price",    "description": "实时价格，/price ETH 查指定币种"},
+        {"command": "market",   "description": "跨所行情 + 恐慌贪婪指数（无需配置）"},
+        {"command": "position", "description": "我的持仓明细和余额（需配置 API Key）"},
+        {"command": "funding",  "description": "跨所资金费率对比 — /funding BTC"},
+        {"command": "oi",       "description": "Hyperliquid 全市场 OI 排行（含 BTC/ETH/SOL）"},
+        {"command": "liq",      "description": "爆仓风险评估（Hyperliquid）"},
+        {"command": "price",    "description": "实时价格 — /price ETH"},
         {"command": "fng",      "description": "恐慌贪婪指数"},
-        {"command": "ta",       "description": "技术分析，/ta BTC 4h signal"},
+        {"command": "ta",       "description": "技术分析 — /ta BTC 4h signal"},
         {"command": "news",     "description": "最新快讯（前10条）| /news hl 查 HL 相关"},
-        {"command": "alerts",   "description": "全部异动信号扫描"},
+        {"command": "alerts",   "description": "多因子信号扫描（Binance 全市场，无需 Key）"},
         {"command": "report",   "description": "今日市场报告"},
         {"command": "weekly",   "description": "本周复盘报告"},
-        {"command": "arb",      "description": "套利 — /arb scan | /arb open BTC 500 | /arb status"},
+        {"command": "arb",      "description": "套利 — /arb scan | open BTC 500 | status"},
         {"command": "grid",     "description": "网格交易（Hyperliquid）— /grid BTC 90000 100000 10 50"},
-        {"command": "trade",             "description": "交易 — /trade open ETH long 100 | /trade close ETH"},
+        {"command": "trade",             "description": "交易 — /trade open ETH long 100 | close ETH"},
         {"command": "override_circuit",  "description": "临时覆盖每日亏损熔断（1小时有效）"},
-        {"command": "compare",   "description": "跨所价格对比 — /compare BTC"},
-        {"command": "exfunding", "description": "跨所资金费率对比 — /exfunding BTC"},
-        {"command": "vol",       "description": "跨所成交量对比 — /vol BTC"},
+        {"command": "compare",   "description": "跨所价格+成交量对比 — /compare BTC"},
         {"command": "divergence","description": "跨所价差扫描"},
-        {"command": "listings",  "description": "查询代币上架情况（现货+合约）— /listings SOL"},
-        {"command": "agent",     "description": "Agent 分析 — /agent scan | status | history"},
-        {"command": "netflow",   "description": "交易所净流量 — /netflow [24h] | signal BTC | wallets"},
+        {"command": "listings",  "description": "代币上架情况（现货+合约）— /listings SOL"},
+        {"command": "agent",     "description": "Agent 状态 — /agent status | history"},
+        {"command": "netflow",   "description": "交易所净流量 — /netflow | signal BTC | wallets"},
         {"command": "track",     "description": "专项追踪 — /track SOL [15min] | report | cancel"},
-        {"command": "mm",        "description": "做市商分析 — /mm BTC（跨所综合）| /mm BTC cross | /mm scan"},
+        {"command": "mm",        "description": "做市商分析（跨所OI+费率）— /mm BTC | cross | scan"},
         {"command": "strategy",  "description": "策略向导 — /strategy new | show | on | off"},
-        {"command": "ask",    "description": "整理市场数据上下文 — /ask 现在 SOL 适合做多吗？"},
-        {"command": "deep",   "description": "整理币种深度数据 — /deep BTC（MM阶段+跨所费率）"},
-        {"command": "advice", "description": "整理持仓上下文 — 供 AI Agent 给出操作建议"},
+        {"command": "ask",    "description": "整理市场数据上下文供 AI Agent 分析"},
+        {"command": "deep",   "description": "币种深度上下文（MM阶段+跨所费率+TA信号）— /deep BTC"},
+        {"command": "advice", "description": "整理持仓上下文供 AI Agent 给操作建议"},
         {"command": "watch",     "description": "链上监控 — /watch add ETH 0x... | list | remove"},
         {"command": "chains",    "description": "链上监控概览"},
-        {"command": "autotrade",         "description": "自动交易状态 / on / off"},
-        {"command": "status",            "description": "Bot 运行状态一览"},
+        {"command": "autotrade",         "description": "自动交易 on/off 及状态"},
+        {"command": "status",            "description": "Bot 运行状态 + 各交易所 API 配置"},
         {"command": "help",              "description": "查看所有指令"},
     ]
     our_names = {c["command"] for c in our_commands}

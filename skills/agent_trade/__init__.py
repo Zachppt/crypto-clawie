@@ -1,28 +1,71 @@
 """
 skills/agent_trade — 多因子智能交易代理
-相比简单阈值触发，agent 具备：
-  1. 多因子评分加权（资金费率 + OI + 价格动量 + 跨所费率确认）
-  2. 动态仓位大小（置信度高 → 仓位更大）
-  3. 决策日志（可追溯每次开平仓原因）
-  4. 持仓退出多条件判断
+数据来源：Binance 永续合约公开 API（两次并行请求，无需 API Key）
+评分因子：
+  1. 资金费率幅度（权重 50%）
+  2. 24h 成交量确认（权重 20%）— 高成交量信号更可靠
+  3. 价格动量同向（权重 20%）
+  4. OKX 跨所确认（权重 15%）— 与 Binance 方向一致则加分
 """
 from __future__ import annotations
 
 import json
-import requests
+import requests as _req
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from skills.base import BaseSkill
 
-T = 5  # timeout seconds
+_BN_FAPI = "https://fapi.binance.com/fapi/v1"
+_TIMEOUT  = 8
 
 
-def _get(url: str) -> dict | None:
+def _fetch_market_data() -> list[dict]:
+    """
+    从 Binance 永续合约批量获取市场数据（2次并行请求）。
+    返回资产列表，每项含：symbol, mark_price, change_24h_pct,
+                          funding_8h, funding_annualized, open_interest, _vol_usdt
+    """
     try:
-        r = requests.get(url, timeout=T, headers={"User-Agent": "crypto-clawie/2.0"})
-        r.raise_for_status()
-        return r.json()
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            f_idx = pool.submit(_req.get, f"{_BN_FAPI}/premiumIndex", timeout=_TIMEOUT)
+            f_tkr = pool.submit(_req.get, f"{_BN_FAPI}/ticker/24hr",  timeout=_TIMEOUT)
+
+        idx_list = f_idx.result().json()   # [{symbol, lastFundingRate, markPrice, ...}]
+        tkr_list = f_tkr.result().json()   # [{symbol, priceChangePercent, quoteVolume, ...}]
+
+        tkr_map: dict[str, dict] = {
+            t["symbol"]: t for t in tkr_list if isinstance(t, dict)
+        }
+
+        assets = []
+        for item in idx_list:
+            if not isinstance(item, dict):
+                continue
+            sym = item.get("symbol", "")
+            if not sym.endswith("USDT"):
+                continue
+            base       = sym[:-4]
+            mark_price = float(item.get("markPrice", 0) or 0)
+            if mark_price == 0:
+                continue
+            funding  = float(item.get("lastFundingRate", 0) or 0)
+            tkr      = tkr_map.get(sym, {})
+            chg_24h  = float(tkr.get("priceChangePercent", 0) or 0)
+            vol_usdt = float(tkr.get("quoteVolume", 0) or 0)
+
+            assets.append({
+                "symbol":             base,
+                "mark_price":         mark_price,
+                "change_24h_pct":     chg_24h,
+                "funding_8h":         funding,
+                "funding_annualized": funding * 3 * 365 * 100,
+                "open_interest":      vol_usdt / mark_price,  # 成交量代理
+                "_vol_usdt":          vol_usdt,
+            })
+
+        return assets
     except Exception:
-        return None
+        return []
 
 
 class AgentTradeSkill(BaseSkill):
@@ -42,13 +85,13 @@ class AgentTradeSkill(BaseSkill):
     # ── 全市场分析 ────────────────────────────────────────────────────────────
 
     def _analyze(self, min_score: float = 0.6, **_) -> dict:
-        """扫描所有资产，返回高置信度交易机会。"""
-        market = self.load("hl_market.json")
-        if not market:
-            return self.err("市场数据未缓存，请等待 fetcher 运行")
+        """扫描 Binance 永续合约所有标的，返回高置信度交易机会。"""
+        assets = _fetch_market_data()
+        if not assets:
+            return self.err("无法获取市场数据（Binance API），请检查网络连接")
 
         opportunities = []
-        for a in market.get("assets", []):
+        for a in assets:
             opp = self._score_asset(a)
             if opp and opp["total_score"] >= min_score:
                 opportunities.append(opp)
@@ -75,31 +118,11 @@ class AgentTradeSkill(BaseSkill):
 
         return self.ok("\n".join(lines), data={"opportunities": opportunities})
 
-    # ── 读取用户自定义策略 ────────────────────────────────────────────────────
-
-    def _load_user_strategy(self) -> dict | None:
-        """读取 memory/my_strategy.json，若不存在或已禁用则返回 None。"""
-        path = self.memory_dir / "my_strategy.json"
-        if not path.exists():
-            return None
-        try:
-            import json
-            s = json.load(open(path))
-            return s if s.get("enabled") else None
-        except Exception:
-            return None
-
     # ── 生成交易决策 ──────────────────────────────────────────────────────────
 
     def _decide(self, **_) -> dict:
-        """
-        生成可执行的交易决策。
-        若用户配置了 my_strategy.json，优先按策略约束过滤机会；
-        否则按全市场多因子评分筛选。
-        """
         user_strategy = self._load_user_strategy()
-
-        result = self._analyze()
+        result        = self._analyze()
         if not result.get("success"):
             return result
 
@@ -107,8 +130,9 @@ class AgentTradeSkill(BaseSkill):
         if not opps:
             return self.ok("🤖 当前无需操作", data={"decisions": []})
 
-        account      = self.load("hl_account.json")
-        open_symbols = set()
+        # 已有持仓（HL 可选，不影响主流程）
+        open_symbols: set[str] = set()
+        account = self.load("hl_account.json")
         if account:
             for pos in account.get("positions", []):
                 open_symbols.add(pos["symbol"])
@@ -118,16 +142,10 @@ class AgentTradeSkill(BaseSkill):
             target_token = user_strategy.get("token", "").upper()
             allowed_dir  = user_strategy.get("direction", "both").lower()
             size_usd     = float(user_strategy.get("size_usd", self.getenv("AUTO_TRADE_SIZE_USD", "50")))
-
-            # 只保留目标币种（若配置了）
             if target_token:
                 opps = [o for o in opps if o["symbol"] == target_token]
-
-            # 只保留匹配方向的机会
             if allowed_dir != "both":
                 opps = [o for o in opps if o["side"] == allowed_dir]
-
-            # 使用策略中的仓位大小
             for opp in opps:
                 opp["suggested_size_usd"] = size_usd
 
@@ -165,22 +183,22 @@ class AgentTradeSkill(BaseSkill):
     # ── 代理状态 ──────────────────────────────────────────────────────────────
 
     def _status(self, **_) -> dict:
-        history = self._load_history()
-        recent  = history[-5:] if history else []
+        history   = self._load_history()
+        recent    = history[-5:] if history else []
+        agent_on  = self.getenv("AGENT_TRADE_ENABLED", "false").lower() == "true"
+        autonomous = self.getenv("AUTONOMOUS_MODE", "false").lower() == "true"
 
-        agent_enabled = self.getenv("AGENT_TRADE_ENABLED", "false").lower() == "true"
-        autonomous    = self.getenv("AUTONOMOUS_MODE", "false").lower() == "true"
-
-        status_icon = "✅" if (agent_enabled and autonomous) else "⏸️"
+        status_icon = "✅" if (agent_on and autonomous) else "⏸️"
         lines = [
             f"🤖 *Agent 交易状态*\n",
-            f"{status_icon} Agent：{'运行中' if (agent_enabled and autonomous) else '已暂停'}",
+            f"{status_icon} Agent：{'运行中' if (agent_on and autonomous) else '已暂停'}",
             f"{'✅' if autonomous else '⚠️'} 自主模式：{'开启' if autonomous else '关闭'}",
             f"\n*评分权重*",
             f"• 资金费率幅度：最高 50%",
-            f"• OI 规模确认：最高 20%",
+            f"• 24h 成交量确认：最高 20%",
             f"• 价格动量同向：最高 20%",
-            f"• 跨所费率确认（Binance）：最高 15%",
+            f"• OKX 跨所确认：最高 15%",
+            f"\n数据来源：Binance 永续合约公开 API（实时）",
             f"\n*近期决策*",
         ]
 
@@ -195,7 +213,7 @@ class AgentTradeSkill(BaseSkill):
 
         lines.extend([
             "\n*命令*",
-            "/agent scan — 立即分析市场",
+            "/alerts — 立即扫描市场",
             "/agent history — 历史决策记录",
         ])
         return self.ok("\n".join(lines), data={"history": recent})
@@ -219,19 +237,17 @@ class AgentTradeSkill(BaseSkill):
     # ── 内部：资产多因子评分 ──────────────────────────────────────────────────
 
     def _score_asset(self, asset: dict) -> dict | None:
-        symbol  = asset["symbol"]
-        funding = asset["funding_8h"]
-        oi      = asset.get("open_interest", 0)
-        price   = asset.get("mark_price", 1) or 1
-        chg_24h = asset.get("change_24h_pct", 0)
+        symbol   = asset["symbol"]
+        funding  = asset["funding_8h"]
+        vol_usdt = asset.get("_vol_usdt", 0)
+        chg_24h  = asset.get("change_24h_pct", 0)
 
         threshold = float(self.getenv("HL_FUNDING_ALERT_THRESHOLD", "0.0005"))
         if abs(funding) < threshold:
-            return None  # 费率不够，不分析
+            return None
 
         score   = 0.0
         factors = []
-        # 资金费率为正 → 做空（收取多头支付的费用）
         side    = "short" if funding > 0 else "long"
 
         # ─ 因子1：资金费率幅度（权重 50%）─────────────────────────────────
@@ -247,20 +263,19 @@ class AgentTradeSkill(BaseSkill):
             score += 0.20
             factors.append(f"费率偏高 {funding*100:+.4f}%")
 
-        # ─ 因子2：OI 规模（权重 20%）──────────────────────────────────────
-        oi_usd = oi * price
-        if oi_usd > 1e8:
+        # ─ 因子2：24h 成交量确认（权重 20%）──────────────────────────────
+        # 高成交量 = 市场关注度高，信号更可靠
+        if vol_usdt > 1e9:
             score += 0.20
-            factors.append(f"OI ${oi_usd/1e6:.0f}M 极大")
-        elif oi_usd > 5e7:
+            factors.append(f"成交量高 ${vol_usdt/1e9:.1f}B")
+        elif vol_usdt > 3e8:
             score += 0.12
-            factors.append(f"OI ${oi_usd/1e6:.0f}M 较大")
-        elif oi_usd > 1e7:
+            factors.append(f"成交量中 ${vol_usdt/1e9:.2f}B")
+        elif vol_usdt > 5e7:
             score += 0.06
-            factors.append(f"OI ${oi_usd/1e6:.0f}M 一般")
+            factors.append(f"成交量 ${vol_usdt/1e6:.0f}M")
 
         # ─ 因子3：价格动量同向（权重 20%）────────────────────────────────
-        # 资金费率正（多拥挤）且价格仍在涨 → 做空信号更强
         if (funding > 0 and chg_24h > 8) or (funding < 0 and chg_24h < -8):
             score += 0.20
             factors.append(f"动量强烈同向 {chg_24h:+.1f}%")
@@ -271,38 +286,54 @@ class AgentTradeSkill(BaseSkill):
             score += 0.05
             factors.append(f"动量轻微同向 {chg_24h:+.1f}%")
 
-        # ─ 因子4：Binance 跨所费率确认（权重 15%）──────────────────────
-        try:
-            d = _get(f"https://fapi.binance.com/fapi/v1/premiumIndex?symbol={symbol}USDT")
-            if d and isinstance(d, dict) and "lastFundingRate" in d:
-                bn_rate = float(d["lastFundingRate"])
-                # 同向确认
-                if (funding > 0 and bn_rate > 0.0003) or (funding < 0 and bn_rate < -0.0003):
+        # ─ 因子4：OKX 跨所费率确认（权重 15%）───────────────────────────
+        # 仅对评分已达基准的资产执行（避免对所有资产都发 HTTP 请求）
+        if score >= 0.25:
+            try:
+                r = _req.get(
+                    "https://www.okx.com/api/v5/public/funding-rate",
+                    params={"instId": f"{symbol}-USDT-SWAP"},
+                    timeout=4,
+                )
+                d = r.json().get("data", [{}])[0]
+                okx_rate = float(d.get("fundingRate", 0) or 0)
+                if (funding > 0 and okx_rate > 0.0003) or (funding < 0 and okx_rate < -0.0003):
                     score += 0.15
-                    factors.append(f"Binance同向 {bn_rate*100:+.4f}%")
-                elif (funding > 0 and bn_rate > 0) or (funding < 0 and bn_rate < 0):
+                    factors.append(f"OKX同向 {okx_rate*100:+.4f}%")
+                elif (funding > 0 and okx_rate > 0) or (funding < 0 and okx_rate < 0):
                     score += 0.07
-                    factors.append(f"Binance同向（弱）{bn_rate*100:+.4f}%")
-        except Exception:
-            pass
+                    factors.append(f"OKX同向（弱）{okx_rate*100:+.4f}%")
+            except Exception:
+                pass
 
         score = min(round(score, 3), 1.0)
 
-        # 动态仓位：置信度越高，建议仓位越大（基础 * 1~2 倍，不超过上限30%）
         base_size = float(self.getenv("AUTO_TRADE_SIZE_USD", "50"))
         max_pos   = float(self.getenv("MAX_POSITION_SIZE_USD", "500"))
         suggested = min(base_size * (0.8 + score), max_pos * 0.3)
 
         return {
-            "symbol":            symbol,
-            "side":              side,
-            "total_score":       score,
-            "factors":           factors,
-            "funding_rate":      funding,
-            "oi_usd":            oi_usd,
-            "change_24h":        chg_24h,
+            "symbol":             symbol,
+            "side":               side,
+            "total_score":        score,
+            "factors":            factors,
+            "funding_rate":       funding,
+            "vol_usdt":           vol_usdt,
+            "change_24h":         chg_24h,
             "suggested_size_usd": round(suggested, 1),
         }
+
+    # ── 读取用户自定义策略 ────────────────────────────────────────────────────
+
+    def _load_user_strategy(self) -> dict | None:
+        path = self.memory_dir / "my_strategy.json"
+        if not path.exists():
+            return None
+        try:
+            s = json.load(open(path))
+            return s if s.get("enabled") else None
+        except Exception:
+            return None
 
     # ── 决策日志 ──────────────────────────────────────────────────────────────
 
