@@ -65,8 +65,8 @@ class FocusSkill(BaseSkill):
             f"• 追踪标的：`{token}`\n"
             f"• 推送间隔：每 `{interval_min}` 分钟\n\n"
             f"调度器将自动推送追踪报告。\n"
-            f"发送 `/focus report` 可立即获取一份。\n"
-            f"发送 `/focus cancel` 停止追踪。",
+            f"发送 `/track report` 可立即获取一份。\n"
+            f"发送 `/track cancel` 停止追踪。",
             data=config,
         )
 
@@ -87,7 +87,7 @@ class FocusSkill(BaseSkill):
         if not path.exists():
             return self.ok(
                 "当前没有专项追踪。\n"
-                "发送 `/focus BTC 15` 开始追踪 BTC，每 15 分钟推送报告。"
+                "发送 `/track BTC 15` 开始追踪 BTC，每 15 分钟推送报告。"
             )
         config = json.load(open(path))
         token    = config["token"]
@@ -106,8 +106,8 @@ class FocusSkill(BaseSkill):
             f"• 推送间隔：每 `{interval}` 分钟\n"
             f"• 启动时间：`{set_at}`\n"
             f"• 上次报告：`{last_report}`\n\n"
-            f"发送 `/focus report` 立即获取报告\n"
-            f"发送 `/focus cancel` 停止追踪",
+            f"发送 `/track report` 立即获取报告\n"
+            f"发送 `/track cancel` 停止追踪",
             data=config,
         )
 

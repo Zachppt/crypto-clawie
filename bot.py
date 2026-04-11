@@ -790,10 +790,14 @@ def _route(chat_id: int, cmd: str, args: list, thread_id: int = None):
             r = skill("focus").run(action="status")
 
         elif sub in ("report", "报告", "now"):
-            send(chat_id, "⏳ 正在生成专项报告...", thread_id=_tid(TOPIC_MARKET))
-            # /track report [TOKEN] — 立即生成，token 可选
+            # /track report [TOKEN] — 整理深度数据，交由 AI Agent 分析
             token = args[1].upper() if len(args) > 1 else None
-            r = skill("focus").run(action="report", token=token)
+            if not token:
+                import json as _j
+                _fp = MEMORY_DIR / "focus.json"
+                token = _j.load(open(_fp)).get("token", "BTC") if _fp.exists() else "BTC"
+            send(chat_id, f"🔍 正在整理 {token} 深度数据，供 AI Agent 分析...", thread_id=_tid(TOPIC_MARKET))
+            r = skill("ai_agent").run(action="deep_dive", symbol=token)
 
         else:
             # /track SOL [15]  — sub 就是 token
