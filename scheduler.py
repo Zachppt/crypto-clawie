@@ -216,6 +216,196 @@ def job_collect_backtest_data():
         log.error(f"job_collect_backtest_data failed: {e}")
 
 
+# ── 任务：自动开平仓 ──────────────────────────────────────────────────────────
+
+def job_auto_trade():
+    """
+    基于资金费率信号自动开平仓（资金费率套利方向）。
+
+    策略：
+      - 资金费率为正（多头付空头）→ 做空，收取资金费
+      - 资金费率为负（空头付多头）→ 做多，收取资金费
+      - 退出条件：费率恢复正常 / 达到止盈 / 触发止损
+
+    需要配置：
+      AUTO_TRADE_ENABLED=true
+      AUTONOMOUS_MODE=true
+    """
+    if os.getenv("AUTO_TRADE_ENABLED", "false").lower() != "true":
+        return
+    if os.getenv("AUTONOMOUS_MODE", "false").lower() != "true":
+        log.warning("AUTO_TRADE_ENABLED=true 但 AUTONOMOUS_MODE=false，自动交易跳过")
+        send_alert(
+            "⚠️ *自动交易未能执行*\n"
+            "`AUTO_TRADE_ENABLED=true` 但 `AUTONOMOUS_MODE=false`\n"
+            "请在 .env 中同时开启两个开关，或发送 /autotrade 查看说明"
+        )
+        return
+
+    min_confidence = float(os.getenv("AUTO_TRADE_MIN_CONFIDENCE", "0.7"))
+    size_usd       = float(os.getenv("AUTO_TRADE_SIZE_USD", "50"))
+    max_positions  = int(os.getenv("AUTO_TRADE_MAX_POSITIONS", "2"))
+    exit_funding   = float(os.getenv("AUTO_TRADE_EXIT_FUNDING", "0.0001"))
+    profit_pct     = float(os.getenv("AUTO_TRADE_PROFIT_PCT", "3"))
+    stop_pct       = float(os.getenv("AUTO_TRADE_STOP_PCT", "2"))
+
+    try:
+        from skills.crypto_alert import CryptoAlertSkill
+        from skills.hl_trade import HLTradeSkill
+
+        trade_env = {k: os.getenv(k, "") for k in [
+            "HL_PRIVATE_KEY", "HL_WALLET_ADDRESS", "HL_USE_TESTNET",
+            "HL_DEFAULT_LEVERAGE", "HL_DEFAULT_MARGIN_MODE",
+            "MAX_POSITION_SIZE_USD", "MAX_DAILY_LOSS_PCT",
+        ]}
+        trade_env["AUTONOMOUS_MODE"] = "true"  # 自动交易强制开启
+
+        alert_skill = CryptoAlertSkill(DATA_DIR, BASE_DIR / "memory", {})
+        trade_skill = HLTradeSkill(DATA_DIR, BASE_DIR / "memory", trade_env)
+
+        # 加载自动交易状态记录
+        auto_trades_path = BASE_DIR / "memory" / "auto_trades.json"
+        auto_trades: list = []
+        if auto_trades_path.exists():
+            try:
+                with open(auto_trades_path) as f:
+                    auto_trades = json.load(f)
+            except Exception:
+                auto_trades = []
+
+        # 当前市场数据
+        market = _load("hl_market.json")
+        market_map: dict = {}
+        if market:
+            for a in market.get("assets", []):
+                market_map[a["symbol"]] = a
+
+        # 当前账户持仓
+        account = _load("hl_account.json")
+        open_symbols: set = set()
+        if account:
+            for pos in account.get("positions", []):
+                open_symbols.add(pos["symbol"])
+
+        # ── Step 1：检查自动仓位的退出条件 ───────────────────────────────────
+        remaining_trades = []
+        for at in auto_trades:
+            sym = at["symbol"]
+
+            # 如果持仓已被外部平掉，清理记录
+            if sym not in open_symbols:
+                log.info(f"Auto-trade {sym} 已无持仓，清理记录")
+                continue
+
+            asset       = market_map.get(sym, {})
+            funding     = asset.get("funding_8h", 0)
+            price       = asset.get("mark_price", 0)
+            entry_price = at.get("entry_price", price) or price
+            side        = at["side"]
+
+            should_exit = False
+            exit_reason = ""
+
+            # 退出条件1：资金费率恢复正常
+            if abs(funding) < exit_funding:
+                should_exit = True
+                exit_reason = f"资金费率恢复正常（{funding*100:.4f}%/8h）"
+
+            # 退出条件2：止盈/止损（按标记价格估算）
+            if price and entry_price:
+                pnl_pct = ((price - entry_price) / entry_price) * (1 if side == "long" else -1) * 100
+                if pnl_pct >= profit_pct:
+                    should_exit = True
+                    exit_reason = f"止盈触发（约 +{pnl_pct:.1f}%）"
+                elif pnl_pct <= -stop_pct:
+                    should_exit = True
+                    exit_reason = f"止损触发（约 {pnl_pct:.1f}%）"
+
+            if should_exit:
+                result = trade_skill.run(action="close", symbol=sym)
+                if result.get("success"):
+                    open_symbols.discard(sym)
+                    send_alert(
+                        f"🤖 *自动平仓*\n"
+                        f"• 标的：`{sym}`\n"
+                        f"• 原因：{exit_reason}\n"
+                        f"• {result['text'].split(chr(10))[0]}"
+                    )
+                    log.info(f"Auto-close {sym}: {exit_reason}")
+                else:
+                    log.error(f"Auto-close {sym} failed: {result['text']}")
+                    remaining_trades.append(at)  # 平仓失败，保留记录
+            else:
+                remaining_trades.append(at)
+
+        auto_trades = remaining_trades
+
+        # ── Step 2：扫描新开仓机会 ────────────────────────────────────────────
+        auto_symbols = {at["symbol"] for at in auto_trades}
+
+        if len(auto_trades) < max_positions:
+            sig_result = alert_skill.run(action="funding")
+            signals = sig_result.get("data", {}).get("signals", [])
+            signals = [s for s in signals if s["confidence"] >= min_confidence]
+            signals.sort(key=lambda x: x["confidence"], reverse=True)
+
+            for sig in signals:
+                if len(auto_trades) >= max_positions:
+                    break
+                sym = sig["symbol"]
+                if sym in open_symbols or sym in auto_symbols:
+                    continue  # 已有持仓，跳过
+
+                funding = market_map.get(sym, {}).get("funding_8h", 0)
+                if funding == 0:
+                    continue
+
+                # 资金费率为正 → 做空（收取多头支付的费用）
+                # 资金费率为负 → 做多（收取空头支付的费用）
+                side = "short" if funding > 0 else "long"
+
+                result = trade_skill.run(
+                    action="open",
+                    symbol=sym,
+                    side=side,
+                    size_usd=size_usd,
+                )
+                if result.get("success"):
+                    entry_price = market_map.get(sym, {}).get("mark_price", 0)
+                    ann = abs(funding) * 3 * 365 * 100
+                    auto_trades.append({
+                        "symbol":         sym,
+                        "side":           side,
+                        "size_usd":       size_usd,
+                        "entry_price":    entry_price,
+                        "entry_time":     datetime.now(timezone.utc).isoformat(),
+                        "entry_funding":  funding,
+                        "confidence":     sig["confidence"],
+                    })
+                    open_symbols.add(sym)
+                    auto_symbols.add(sym)
+                    send_alert(
+                        f"🤖 *自动开仓*\n"
+                        f"• 标的：`{sym}` {'做空 📉' if side == 'short' else '做多 📈'}\n"
+                        f"• 金额：`${size_usd}` USDC\n"
+                        f"• 资金费率：`{funding*100:+.4f}%/8h`（年化 ~{ann:.0f}%）\n"
+                        f"• 置信度：`{sig['confidence']*100:.0f}%`\n"
+                        f"• 策略：收取资金费，待费率恢复平仓\n"
+                        f"• 止盈 +{profit_pct}% / 止损 -{stop_pct}%"
+                    )
+                    log.info(f"Auto-open {sym} {side} ${size_usd} (funding={funding:.6f})")
+                else:
+                    log.warning(f"Auto-open {sym} failed: {result['text']}")
+
+        # 持久化自动交易记录
+        auto_trades_path.parent.mkdir(exist_ok=True)
+        with open(auto_trades_path, "w") as f:
+            json.dump(auto_trades, f, ensure_ascii=False, indent=2)
+
+    except Exception as e:
+        log.error(f"job_auto_trade failed: {e}", exc_info=True)
+
+
 # ── 任务：每日报告 ────────────────────────────────────────────────────────────
 
 def job_daily_report():
@@ -281,6 +471,18 @@ def main():
 
     # 每小时清理过期预警记录
     scheduler.add_job(db.clear_expired, IntervalTrigger(hours=1), id="db_cleanup")
+
+    # 自动交易：在 fetch + 预警 后 90s 启动，使用最新信号
+    auto_trade_enabled = os.getenv("AUTO_TRADE_ENABLED", "false").lower() == "true"
+    if auto_trade_enabled:
+        auto_start = datetime.now(timezone.utc) + timedelta(seconds=90)
+        scheduler.add_job(job_auto_trade, IntervalTrigger(minutes=FETCH_INTERVAL),
+                          id="auto_trade", next_run_time=auto_start)
+        log.info(f"  Auto-trade:      ENABLED (every {FETCH_INTERVAL} min, confidence≥"
+                 f"{os.getenv('AUTO_TRADE_MIN_CONFIDENCE', '0.7')}, "
+                 f"size=${os.getenv('AUTO_TRADE_SIZE_USD', '50')})")
+    else:
+        log.info("  Auto-trade:      disabled (set AUTO_TRADE_ENABLED=true to enable)")
 
     log.info(f"  Data fetch:      every {FETCH_INTERVAL} min")
     log.info(f"  News check:      every {NEWS_INTERVAL} min")

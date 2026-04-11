@@ -42,7 +42,7 @@ import importlib
 from pathlib import Path
 
 import requests
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -97,6 +97,37 @@ def send(chat_id: int, text: str, parse_mode: str = "Markdown", thread_id: int =
     except Exception as e:
         log.warning(f"send failed: {e}")
 
+
+def send_with_keyboard(chat_id: int, text: str, keyboard: list,
+                       parse_mode: str = "Markdown", thread_id: int = None):
+    """发送带 InlineKeyboard 的消息。keyboard 是二维按钮列表。"""
+    payload = {
+        "chat_id":      chat_id,
+        "text":         text,
+        "parse_mode":   parse_mode,
+        "reply_markup": {"inline_keyboard": keyboard},
+    }
+    if thread_id:
+        payload["message_thread_id"] = int(thread_id)
+    try:
+        requests.post(f"{API_URL}/sendMessage", json=payload, timeout=10)
+    except Exception as e:
+        log.warning(f"send_with_keyboard failed: {e}")
+
+
+def answer_callback(callback_id: str, text: str = ""):
+    """应答 callback query，防止客户端转圈。"""
+    try:
+        requests.post(f"{API_URL}/answerCallbackQuery",
+                      json={"callback_query_id": callback_id, "text": text}, timeout=5)
+    except Exception:
+        pass
+
+
+# ── 待确认交易暂存（内联键盘确认流程）────────────────────────────────────────
+# key: str(chat_id), value: dict with trade params + expires_at
+_pending_trades: dict = {}
+
 # ── Skill 工厂 ────────────────────────────────────────────────────────────────
 
 _skill_map = {
@@ -110,10 +141,11 @@ _skill_map = {
     "hl_trade":      ("skills.hl_trade",      "HLTradeSkill"),
 }
 
-def skill(name: str):
+def skill(name: str, override_env: dict = None):
     module_path, class_name = _skill_map[name]
     mod = importlib.import_module(module_path)
-    return getattr(mod, class_name)(DATA_DIR, MEMORY_DIR, env)
+    merged_env = {**env, **(override_env or {})}
+    return getattr(mod, class_name)(DATA_DIR, MEMORY_DIR, merged_env)
 
 # ── 已知交易对 ────────────────────────────────────────────────────────────────
 
@@ -133,7 +165,48 @@ def known_symbols() -> set:
         pass
     return _symbols_cache
 
-# ── 帮助文本 ──────────────────────────────────────────────────────────────────
+# ── 帮助 & 引导文本 ───────────────────────────────────────────────────────────
+
+ONBOARD_TEXT = r"""👋 *欢迎使用 Clawie！*
+
+我是一个 Hyperliquid 永续合约交易助手，可以帮你：
+• 监控资金费率、持仓风险、市场异动
+• 自动发送预警通知
+• 手动或自动执行永续合约交易
+
+─────────────────────────
+*第一步：查看市场*
+
+/market — 市场总览（资金费率 + 情绪 + 账户）
+/funding — 资金费率排行（做多前必看！）
+/alerts — 当前异动信号扫描
+
+─────────────────────────
+*第二步：查看我的账户*
+
+/position — 我的持仓和余额
+/liq — 爆仓风险评估
+
+─────────────────────────
+*第三步：手动下单*
+
+点击下方按钮或直接发命令：
+
+`/trade open ETH long 100` — 做多 ETH $100
+`/trade open BTC short 200 3` — 做空 BTC $200，3倍杠杆
+`/trade close ETH` — 平仓 ETH
+
+⚠️ 首次使用建议先在 .env 设置 `HL_USE_TESTNET=true` 用测试网练习
+
+─────────────────────────
+*第四步（进阶）：自动交易*
+
+让 Bot 根据资金费率信号自动开平仓：
+/autotrade — 查看自动交易状态和开启方式
+
+─────────────────────────
+/status — 查看 Bot 运行状态
+/help — 完整指令列表"""
 
 HELP_TEXT = r"""🤖 *Clawie 指令列表*
 
@@ -171,6 +244,14 @@ HELP_TEXT = r"""🤖 *Clawie 指令列表*
 /trade — 查看当前持仓
 /override\_circuit — 临时覆盖当日亏损熔断（1小时）
 
+*自动交易*
+/autotrade — 查看自动交易状态
+/autotrade on — 启用自动交易
+/autotrade off — 关闭自动交易
+
+*系统*
+/status — Bot 运行状态一览
+
 *套利与策略*
 /arb scan — 扫描资金费套利机会
 /arb open BTC 500 — 记录套利仓位（币种 金额USD）
@@ -187,6 +268,11 @@ HELP_TEXT = r"""🤖 *Clawie 指令列表*
 # ── 命令路由 ──────────────────────────────────────────────────────────────────
 
 def handle(update: dict):
+    # ── 内联键盘回调 ─────────────────────────────────────────────────────────
+    if "callback_query" in update:
+        _handle_callback(update["callback_query"])
+        return
+
     msg = update.get("message") or update.get("edited_message")
     if not msg:
         return
@@ -209,6 +295,71 @@ def handle(update: dict):
     except Exception as e:
         log.error(f"route error: {e}", exc_info=True)
         send(chat_id, f"❌ 执行出错：{e}", thread_id=thread_id)
+
+
+def _handle_callback(cq: dict):
+    """处理内联键盘按钮点击。"""
+    cq_id     = cq["id"]
+    chat_id   = cq["message"]["chat"]["id"]
+    thread_id = cq["message"].get("message_thread_id")
+    data      = cq.get("data", "")
+
+    answer_callback(cq_id)
+
+    key = str(chat_id)
+    pending = _pending_trades.get(key)
+
+    if data == "trade_confirm" and pending:
+        # 检查是否过期（5分钟）
+        expires = datetime.fromisoformat(pending["expires_at"])
+        if datetime.now(timezone.utc) > expires:
+            _pending_trades.pop(key, None)
+            send(chat_id, "⏰ 确认已超时（5分钟），请重新发送交易指令", thread_id=thread_id)
+            return
+
+        _pending_trades.pop(key, None)
+        sym      = pending["symbol"]
+        side     = pending["side"]
+        size_usd = pending["size_usd"]
+        lev      = pending.get("leverage")
+
+        # 以 AUTONOMOUS_MODE=true 执行
+        trade_env = {k: os.getenv(k, "") for k in [
+            "HL_PRIVATE_KEY", "HL_WALLET_ADDRESS", "HL_USE_TESTNET",
+            "HL_DEFAULT_LEVERAGE", "HL_DEFAULT_MARGIN_MODE",
+            "MAX_POSITION_SIZE_USD", "MAX_DAILY_LOSS_PCT",
+        ]}
+        trade_env["AUTONOMOUS_MODE"] = "true"
+        r = skill("hl_trade", override_env=trade_env).run(
+            action="open", symbol=sym, side=side, size_usd=size_usd, leverage=lev
+        )
+        send(chat_id, r["text"], thread_id=thread_id)
+
+    elif data == "trade_cancel":
+        _pending_trades.pop(key, None)
+        send(chat_id, "❌ 已取消开仓", thread_id=thread_id)
+
+    elif data == "close_confirm" and pending:
+        expires = datetime.fromisoformat(pending["expires_at"])
+        if datetime.now(timezone.utc) > expires:
+            _pending_trades.pop(key, None)
+            send(chat_id, "⏰ 确认已超时，请重新发送指令", thread_id=thread_id)
+            return
+
+        _pending_trades.pop(key, None)
+        sym = pending["symbol"]
+        trade_env = {k: os.getenv(k, "") for k in [
+            "HL_PRIVATE_KEY", "HL_WALLET_ADDRESS", "HL_USE_TESTNET",
+            "HL_DEFAULT_LEVERAGE", "HL_DEFAULT_MARGIN_MODE",
+            "MAX_POSITION_SIZE_USD", "MAX_DAILY_LOSS_PCT",
+        ]}
+        trade_env["AUTONOMOUS_MODE"] = "true"
+        r = skill("hl_trade", override_env=trade_env).run(action="close", symbol=sym)
+        send(chat_id, r["text"], thread_id=thread_id)
+
+    elif data == "close_cancel":
+        _pending_trades.pop(key, None)
+        send(chat_id, "❌ 已取消平仓", thread_id=thread_id)
 
 
 def _route(chat_id: int, cmd: str, args: list, thread_id: int = None):
@@ -324,14 +475,68 @@ def _route(chat_id: int, cmd: str, args: list, thread_id: int = None):
                      thread_id=_tid(TOPIC_TRADE))
                 return
             lev = int(args[4]) if len(args) > 4 else None
-            r = skill("hl_trade").run(action="open", symbol=sym, side=side,
-                                      size_usd=size_usd, leverage=lev)
+
+            autonomous = os.getenv("AUTONOMOUS_MODE", "false").lower() == "true"
+            if autonomous:
+                r = skill("hl_trade").run(action="open", symbol=sym, side=side,
+                                          size_usd=size_usd, leverage=lev)
+                send(chat_id, r["text"], thread_id=_tid(TOPIC_TRADE))
+            else:
+                # 显示内联键盘确认
+                lev_display = lev or os.getenv("HL_DEFAULT_LEVERAGE", "3")
+                _pending_trades[str(chat_id)] = {
+                    "type":       "open",
+                    "symbol":     sym,
+                    "side":       side,
+                    "size_usd":   size_usd,
+                    "leverage":   lev,
+                    "expires_at": (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat(),
+                }
+                keyboard = [[
+                    {"text": "✅ 确认开仓", "callback_data": "trade_confirm"},
+                    {"text": "❌ 取消",     "callback_data": "trade_cancel"},
+                ]]
+                send_with_keyboard(
+                    chat_id,
+                    f"⏳ *确认开仓*\n\n"
+                    f"• 标的：`{sym}`\n"
+                    f"• 方向：{'做多 📈' if side == 'long' else '做空 📉'}\n"
+                    f"• 金额：`${size_usd}` USDC\n"
+                    f"• 杠杆：`{lev_display}x`\n\n"
+                    f"_点击确认后将立即以市价下单_",
+                    keyboard,
+                    thread_id=_tid(TOPIC_TRADE),
+                )
+            return
+
         elif sub in ("close", "平仓"):
             sym = args[1].upper() if len(args) > 1 else None
             if not sym:
                 send(chat_id, "❌ 格式：`/trade close <币种>`", thread_id=_tid(TOPIC_TRADE))
                 return
-            r = skill("hl_trade").run(action="close", symbol=sym)
+
+            autonomous = os.getenv("AUTONOMOUS_MODE", "false").lower() == "true"
+            if autonomous:
+                r = skill("hl_trade").run(action="close", symbol=sym)
+                send(chat_id, r["text"], thread_id=_tid(TOPIC_TRADE))
+            else:
+                _pending_trades[str(chat_id)] = {
+                    "type":       "close",
+                    "symbol":     sym,
+                    "expires_at": (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat(),
+                }
+                keyboard = [[
+                    {"text": "✅ 确认平仓", "callback_data": "close_confirm"},
+                    {"text": "❌ 取消",     "callback_data": "close_cancel"},
+                ]]
+                send_with_keyboard(
+                    chat_id,
+                    f"⏳ *确认平仓*\n\n• 标的：`{sym}`\n\n_将以市价全部平仓_",
+                    keyboard,
+                    thread_id=_tid(TOPIC_TRADE),
+                )
+            return
+
         elif sub in ("cancel", "撤单"):
             sym = args[1].upper() if len(args) > 1 else None
             oid = int(args[2]) if len(args) > 2 else None
@@ -369,8 +574,135 @@ def _route(chat_id: int, cmd: str, args: list, thread_id: int = None):
         r = skill("hl_monitor").run(action="funding", symbol=cmd.upper())
         send(chat_id, r["text"], thread_id=_tid(TOPIC_MARKET))
 
+    # ── 自动交易管理 ──────────────────────────────────────────────────────────
+    elif cmd == "autotrade":
+        sub = args[0].lower() if args else "status"
+        auto_enabled   = os.getenv("AUTO_TRADE_ENABLED", "false").lower() == "true"
+        autonomous     = os.getenv("AUTONOMOUS_MODE", "false").lower() == "true"
+        min_conf       = os.getenv("AUTO_TRADE_MIN_CONFIDENCE", "0.7")
+        size_usd       = os.getenv("AUTO_TRADE_SIZE_USD", "50")
+        max_pos        = os.getenv("AUTO_TRADE_MAX_POSITIONS", "2")
+        profit_pct     = os.getenv("AUTO_TRADE_PROFIT_PCT", "3")
+        stop_pct       = os.getenv("AUTO_TRADE_STOP_PCT", "2")
+        exit_funding   = os.getenv("AUTO_TRADE_EXIT_FUNDING", "0.0001")
+
+        if sub in ("on", "enable", "开启"):
+            send(chat_id,
+                 "⚠️ *开启自动交易*\n\n"
+                 "需要在服务器的 `.env` 文件中设置以下配置：\n\n"
+                 "```\n"
+                 "AUTONOMOUS_MODE=true        # 允许自动执行交易\n"
+                 "AUTO_TRADE_ENABLED=true     # 开启自动交易任务\n"
+                 "AUTO_TRADE_SIZE_USD=50      # 每笔金额（建议从小值开始）\n"
+                 "AUTO_TRADE_MIN_CONFIDENCE=0.7  # 触发阈值\n"
+                 "AUTO_TRADE_PROFIT_PCT=3     # 止盈 %\n"
+                 "AUTO_TRADE_STOP_PCT=2       # 止损 %\n"
+                 "```\n\n"
+                 "修改后重启调度器：`pm2 restart clawie-scheduler`\n\n"
+                 "⚡ *建议先用测试网（`HL_USE_TESTNET=true`）验证！*",
+                 thread_id=_tid(TOPIC_TRADE))
+        elif sub in ("off", "disable", "关闭"):
+            send(chat_id,
+                 "在 `.env` 中设置 `AUTO_TRADE_ENABLED=false`，"
+                 "然后 `pm2 restart clawie-scheduler` 生效",
+                 thread_id=_tid(TOPIC_TRADE))
+        else:
+            # 显示状态
+            auto_trades_path = MEMORY_DIR / "auto_trades.json"
+            auto_trades = []
+            if auto_trades_path.exists():
+                try:
+                    with open(auto_trades_path) as f:
+                        auto_trades = json.load(f)
+                except Exception:
+                    pass
+
+            status_icon = "✅" if (auto_enabled and autonomous) else ("⚠️" if auto_enabled else "⏸️")
+            lines = [
+                f"🤖 *自动交易状态*\n",
+                f"{status_icon} 自动交易：{'开启' if auto_enabled else '关闭'}",
+                f"{'✅' if autonomous else '⚠️'} 自主模式（AUTONOMOUS_MODE）：{'开启' if autonomous else '关闭'}",
+            ]
+            if auto_enabled and not autonomous:
+                lines.append("\n⚠️ _需同时开启 `AUTONOMOUS_MODE=true` 才能自动执行_")
+
+            lines.append(f"\n*配置*")
+            lines.append(f"• 每笔金额：`${size_usd}` USDC")
+            lines.append(f"• 最低置信度：`{float(min_conf)*100:.0f}%`")
+            lines.append(f"• 最多仓位：`{max_pos}` 个")
+            lines.append(f"• 止盈：`+{profit_pct}%` / 止损：`-{stop_pct}%`")
+            lines.append(f"• 退出费率：`< {float(exit_funding)*100:.4f}%/8h`")
+
+            if auto_trades:
+                lines.append(f"\n*当前自动仓位（{len(auto_trades)} 个）*")
+                for at in auto_trades:
+                    ann = abs(at.get("entry_funding", 0)) * 3 * 365 * 100
+                    lines.append(
+                        f"• `{at['symbol']}` {at['side']} ${at.get('size_usd', '?')} "
+                        f"| 入场费率 ~{ann:.0f}% 年化"
+                    )
+            else:
+                lines.append("\n当前无自动持仓")
+
+            lines.append("\n/autotrade on — 查看开启方法")
+            send(chat_id, "\n".join(lines), thread_id=_tid(TOPIC_TRADE))
+
+    # ── 系统状态 ──────────────────────────────────────────────────────────────
+    elif cmd in ("status", "健康", "状态"):
+        has_key    = bool(os.getenv("HL_PRIVATE_KEY"))
+        has_wallet = bool(os.getenv("HL_WALLET_ADDRESS"))
+        autonomous = os.getenv("AUTONOMOUS_MODE", "false").lower() == "true"
+        auto_trade = os.getenv("AUTO_TRADE_ENABLED", "false").lower() == "true"
+        testnet    = os.getenv("HL_USE_TESTNET", "false").lower() == "true"
+
+        # 数据新鲜度
+        from skills.base import BaseSkill
+        _bs = BaseSkill(DATA_DIR, MEMORY_DIR, env)
+        mkt_age = _bs.data_age_minutes("hl_market.json")
+        acc_age = _bs.data_age_minutes("hl_account.json")
+
+        if mkt_age < 6:
+            data_status = f"✅ 正常（{mkt_age:.0f} 分钟前）"
+        elif mkt_age < 30:
+            data_status = f"⚠️ 偏旧（{mkt_age:.0f} 分钟前）"
+        else:
+            data_status = f"❌ 过期（{mkt_age:.0f} 分钟前，调度器可能未运行）"
+
+        # 自动交易仓位
+        auto_trades_path = MEMORY_DIR / "auto_trades.json"
+        auto_count = 0
+        if auto_trades_path.exists():
+            try:
+                with open(auto_trades_path) as f:
+                    auto_count = len(json.load(f))
+            except Exception:
+                pass
+
+        lines = [
+            "📊 *系统状态*\n",
+            "*配置*",
+            f"{'✅' if has_key    else '❌'} HL 私钥",
+            f"{'✅' if has_wallet else '❌'} 钱包地址",
+            f"{'🧪' if testnet    else '🌐'} 网络：{'测试网' if testnet else '主网'}",
+            f"{'✅' if autonomous else '⚠️'} 自主模式（手动交易确认）：{'开启' if autonomous else '关闭'}",
+            f"{'✅' if auto_trade else '⏸️'} 自动交易：{'开启' if auto_trade else '关闭'}",
+            f"\n*数据*",
+            f"市场数据：{data_status}",
+            f"账户数据：{acc_age:.0f} 分钟前",
+            f"\n*自动仓位*：{auto_count} 个",
+            f"\n*快速操作*",
+            f"/market — 市场概览",
+            f"/position — 我的持仓",
+            f"/alerts — 异动信号",
+            f"/autotrade — 自动交易配置",
+        ]
+        send(chat_id, "\n".join(lines), thread_id=thread_id)
+
     # ── 帮助 ─────────────────────────────────────────────────────────────────
-    elif cmd in ("start", "help", "帮助"):
+    elif cmd == "start":
+        send(chat_id, ONBOARD_TEXT, thread_id=thread_id)
+
+    elif cmd in ("help", "帮助"):
         send(chat_id, HELP_TEXT, thread_id=thread_id)
 
     else:
@@ -397,6 +729,8 @@ def register_commands():
         {"command": "backtest",          "description": "策略回测（合成数据快速验证）"},
         {"command": "trade",             "description": "交易 — /trade open ETH long 100 | /trade close ETH"},
         {"command": "override_circuit",  "description": "临时覆盖每日亏损熔断（1小时有效）"},
+        {"command": "autotrade",         "description": "自动交易状态 / on / off"},
+        {"command": "status",            "description": "Bot 运行状态一览"},
         {"command": "help",              "description": "查看所有指令"},
     ]
     our_names = {c["command"] for c in our_commands}
@@ -431,7 +765,7 @@ def main():
             r = requests.get(f"{API_URL}/getUpdates", params={
                 "offset": offset,
                 "timeout": 30,
-                "allowed_updates": ["message"],
+                "allowed_updates": ["message", "callback_query"],
             }, timeout=40)
             updates = r.json().get("result", [])
             for u in updates:
