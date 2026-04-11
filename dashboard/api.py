@@ -1,6 +1,8 @@
 """
 dashboard/api.py — Clawie Dashboard Backend
-FastAPI server that reads local JSON cache files (zero extra API calls).
+FastAPI server. Summary + positions read local JSON cache (zero extra API calls).
+Funding rates come from Binance perp public API (live, no key needed),
+with automatic fallback to hl_market.json cache.
 
 Start:
   uvicorn dashboard.api:app --host 0.0.0.0 --port 8080
@@ -99,7 +101,6 @@ def index():
 @app.get("/api/summary")
 def api_summary():
     account = _load(DATA / "hl_account.json") or {}
-    market  = _load(DATA / "hl_market.json")  or {}
     snap    = _load(DATA / "market_snapshot.json") or {}
     history = _load(MEMORY / "trade_history.json") or []
 
@@ -121,8 +122,10 @@ def api_summary():
     circuit_ok   = not (balance > 0 and daily_pnl < 0 and
                         abs(daily_pnl) / balance * 100 >= max_loss_pct)
 
-    # Data freshness (use market file as proxy)
-    age_s = _data_age_seconds(DATA / "hl_market.json")
+    # Data freshness — use market_snapshot (cross-exchange), fallback to hl_market
+    age_s = _data_age_seconds(DATA / "market_snapshot.json")
+    if age_s == float("inf"):
+        age_s = _data_age_seconds(DATA / "hl_market.json")
 
     return {
         "balance":           round(balance, 2),
@@ -143,17 +146,45 @@ def api_summary():
 
 @app.get("/api/funding")
 def api_funding():
+    """
+    Cross-exchange funding rates via Binance perp public API (200+ assets).
+    Falls back to hl_market.json cache if Binance is unreachable.
+    """
+    # Primary: Binance perp API (live, no key needed)
+    try:
+        from skills.agent_trade import _fetch_market_data
+        assets = _fetch_market_data()
+        if assets:
+            top30 = sorted(assets, key=lambda x: abs(x.get("funding_8h", 0)), reverse=True)[:30]
+            return {
+                "source": "binance",
+                "total":  len(assets),
+                "assets": [
+                    {
+                        "symbol":     a["symbol"],
+                        "rate":       round(a.get("funding_8h", 0) * 100, 4),
+                        "annualized": round(a.get("funding_annualized", 0), 1),
+                        "price":      a.get("mark_price", 0),
+                        "oi_usd_m":   round(a.get("_vol_usdt", 0) / 1e6, 1),
+                        "change_24h": round(a.get("change_24h_pct", 0), 2),
+                    }
+                    for a in top30
+                ],
+            }
+    except Exception:
+        pass
+
+    # Fallback: HL cache
     market = _load(DATA / "hl_market.json") or {}
     assets = market.get("assets", [])
-
-    top30 = sorted(assets, key=lambda x: abs(x.get("funding_8h", 0)), reverse=True)[:30]
-
+    top30  = sorted(assets, key=lambda x: abs(x.get("funding_8h", 0)), reverse=True)[:30]
     return {
+        "source": "hl_cache",
         "total":  len(assets),
         "assets": [
             {
                 "symbol":     a["symbol"],
-                "rate":       round(a.get("funding_8h", 0) * 100, 4),      # in %
+                "rate":       round(a.get("funding_8h", 0) * 100, 4),
                 "annualized": round(a.get("funding_annualized", 0), 1),
                 "price":      a.get("mark_price", 0),
                 "oi_usd_m":   round(a.get("open_interest", 0) * a.get("mark_price", 0) / 1e6, 1),
@@ -168,17 +199,24 @@ def api_funding():
 
 @app.get("/api/positions")
 def api_positions():
-    account    = _load(DATA / "hl_account.json") or {}
-    market     = _load(DATA / "hl_market.json")  or {}
+    account  = _load(DATA / "hl_account.json") or {}
+    # Try ws_prices for live mark price, fallback to hl_market cache
+    ws       = _load(DATA / "ws_prices.json") or {}
+    ws_prices = ws if isinstance(ws, dict) else ws.get("prices", {})
+    market   = _load(DATA / "hl_market.json") or {}
     assets_map = {a["symbol"]: a for a in market.get("assets", [])}
 
     enriched = []
     for p in account.get("positions", []):
         sym   = p.get("symbol", "")
+        # Live WS price takes priority
+        ws_p  = ws_prices.get(sym, {})
+        live_price = float(ws_p.get("price", 0)) if ws_p and ws_p.get("price") else 0
         asset = assets_map.get(sym, {})
+        mark  = live_price or asset.get("mark_price", p.get("entry_price", 0))
         enriched.append({
             **p,
-            "mark_price":   asset.get("mark_price", p.get("entry_price", 0)),
+            "mark_price":   mark,
             "funding_rate": round(asset.get("funding_8h", 0) * 100, 4),
         })
 
@@ -194,10 +232,10 @@ def api_positions():
 def api_signals():
     try:
         from skills.crypto_alert import CryptoAlertSkill
-        skill  = CryptoAlertSkill(DATA, MEMORY, _env())
-        result = skill.run(action="scan")
+        skill   = CryptoAlertSkill(DATA, MEMORY, _env())
+        result  = skill.run(action="scan")
         signals = result.get("data", {}).get("signals", [])
-    except Exception as e:
+    except Exception:
         signals = []
     return {"signals": signals}
 
@@ -231,7 +269,7 @@ def api_arb():
         })
 
     return {
-        "positions":       result,
+        "positions":        result,
         "total_est_income": round(sum(r["est_income"] for r in result), 2),
     }
 
@@ -280,9 +318,9 @@ def api_news():
 
 @app.get("/api/grid")
 def api_grid():
-    grids   = _load(MEMORY / "grid_positions.json") or {}
-    market  = _load(DATA / "hl_market.json") or {}
-    assets  = {a["symbol"]: a for a in market.get("assets", [])}
+    grids  = _load(MEMORY / "grid_positions.json") or {}
+    market = _load(DATA / "hl_market.json") or {}
+    assets = {a["symbol"]: a for a in market.get("assets", [])}
 
     result = []
     for gid, g in grids.items():
