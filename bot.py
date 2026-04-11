@@ -7,22 +7,21 @@ bot.py — Telegram 指令机器人
     /position          — 持仓明细和账户余额
     /liq               — 爆仓风险评估
 
-  HL 市场
-    /market            — 市场概览（资金费率 + 情绪 + 账户摘要）
-    /funding           — 资金费率排行 Top 20
-    /funding BTC       — 指定币种资金费率详情
-    /oi                — 未平仓量排行 Top 10
-    /oi BTC            — 指定币种未平仓量
+  市场（跨所，数据来源：Binance/OKX/Bybit/HL）
+    /market            — 跨所行情 + 恐慌贪婪 + HL 账户摘要
+    /funding BTC       — 跨所资金费率对比（Binance/OKX/Bybit/HL）
+    /oi                — HL 未平仓量排行 Top 10
+    /oi BTC            — 指定币种 OI
 
   行情
-    /price BTC         — 实时价格（默认 BTC）
+    /price BTC         — 实时价格（WebSocket/Binance 优先）
     /fng               — 恐慌贪婪指数
     /ta BTC            — 技术分析（RSI/MA/BB/MACD）
     /ta ETH 4h signal  — 指定周期 + 精简信号
 
   快讯
     /news              — 最新快讯（前 10 条）
-    /hlnews            — HL 相关快讯
+    /news hl           — HL 相关快讯（/hlnews 别名）
 
   信号
     /alerts            — 全部异动信号扫描
@@ -32,7 +31,7 @@ bot.py — Telegram 指令机器人
     /weekly            — 本周复盘报告
 
   快捷查询
-    /BTC /ETH /SOL 等  — 价格 + 资金费率（任意 HL 交易对）
+    /BTC /ETH /SOL 等  — 跨所实时价格 + 资金费率
 
   数据上下文整理（配合群组内 AI Agent 使用）
     /ask <问题>        — 整理市场数据 + 附问题，@AI Agent 分析
@@ -203,16 +202,18 @@ def known_symbols() -> set:
 ONBOARD_TEXT = r"""👋 *欢迎使用 Clawie！*
 
 我是你的加密货币交易 + 行情助手，包含两部分：
-• *AK Bot*（我）— 命令驱动，实时数据、下单、报告
+• *AK Bot*（我）— 命令驱动，实时跨所数据、下单、报告
 • *AI Agent*（群里的 @DigentZach）— 智能分析，@他 可以问任何问题
+
+数据来源：Binance / OKX / Bybit / Hyperliquid（跨所聚合）
 
 ─────────────────────────
 *Step 1 — 先看市场*
 
-/market — 市场总览（资金费率 + 恐慌贪婪 + 账户）
-/funding BTC — 指定币种资金费率详情
-/alerts — 异动信号扫描
-/ta BTC 1h — BTC 1小时技术分析（RSI / MA / BB / MACD）
+/market — 跨所行情 + 恐慌贪婪 + HL 账户摘要
+/funding BTC — 跨所资金费率对比（含套利机会提示）
+/alerts — 多因子异动信号扫描
+/ta BTC 1h — BTC 1h 技术分析（RSI / MA / BB / MACD）
 
 ─────────────────────────
 *Step 2 — 查看账户*
@@ -221,10 +222,10 @@ ONBOARD_TEXT = r"""👋 *欢迎使用 Clawie！*
 /liq — 爆仓风险评估
 
 ─────────────────────────
-*Step 3 — 跨所比较*
+*Step 3 — 跨所深度分析*
 
 /compare ETH — 跨所价格对比（Binance / OKX / Bybit / Gate / HL）
-/exfunding BTC — 跨所资金费率对比 + 套利机会提示
+/mm BTC — BTC 跨所做市商综合分析（阶段识别 + OI 分布）
 /divergence — 主流币价差异动扫描
 
 ─────────────────────────
@@ -232,6 +233,7 @@ ONBOARD_TEXT = r"""👋 *欢迎使用 Clawie！*
 
 `/trade open ETH long 100` — 做多 ETH $100
 `/trade close ETH` — 平仓 ETH
+最后加 `binance` / `okx` / `bybit` 可在指定交易所执行
 ⚠️ 首次使用建议先设置 `HL_USE_TESTNET=true`
 
 ─────────────────────────
@@ -248,19 +250,18 @@ ONBOARD_TEXT = r"""👋 *欢迎使用 Clawie！*
 
 HELP_TEXT = r"""🤖 *Clawie 指令列表*
 
-*账户*
+*账户（HL）*
 /position — 持仓明细和余额
 /liq — 爆仓风险评估
 
-*HL 市场*
-/market — 市场概览
-/funding — 资金费率排行
-/funding BTC — 指定币种费率
-/oi — 未平仓量排行
+*市场（跨所：Binance / OKX / Bybit / HL）*
+/market — 跨所行情 + 恐慌贪婪 + HL 账户摘要
+/funding BTC — 跨所资金费率对比 + 套利机会
+/oi — HL 未平仓量排行
 /oi BTC — 指定币种 OI
 
 *行情*
-/price — 价格（默认 BTC）
+/price — 实时价格（WebSocket/Binance 优先）
 /price ETH — 指定币种价格
 /fng — 恐慌贪婪指数
 
@@ -271,11 +272,11 @@ HELP_TEXT = r"""🤖 *Clawie 指令列表*
 /ta BTC 1h ohlcv — 原始 K 线数据
 
 *快讯*
-/news — 最新快讯
-/hlnews — HL 相关快讯
+/news — 最新快讯（前 10 条）
+/news hl — HL 相关快讯（/hlnews 别名）
 
 *信号与报告*
-/alerts — 全部异动信号
+/alerts — 全部异动信号扫描
 /report — 今日报告
 /weekly — 本周复盘
 
@@ -285,7 +286,8 @@ HELP_TEXT = r"""🤖 *Clawie 指令列表*
 /trade close ETH — 平仓
 /trade cancel ETH 12345 — 撤单（需 order\_id）
 /trade leverage ETH 5 cross — 设置杠杆
-/trade — 查看当前持仓
+最后加 `binance` / `okx` / `bybit` 指定交易所
+/position — 查看当前持仓（不要用 /trade 无参数）
 /override\_circuit — 临时覆盖当日亏损熔断（1小时）
 
 *自动交易*
@@ -295,14 +297,21 @@ HELP_TEXT = r"""🤖 *Clawie 指令列表*
 
 *多交易所聚合*
 /compare BTC — 跨所价格对比（Binance/OKX/Bybit/Gate/HL）
-/exfunding BTC — 跨所资金费率对比
-/vol BTC — 跨所成交量对比
 /divergence — 扫描主流币跨所价差
+/vol BTC — 跨所成交量对比
+/listings SOL — 上架情况（现货+合约各所）
+（/exfunding 是 /funding 的别名，效果相同）
+
+*做市商分析（跨所）*
+/mm BTC — BTC 跨所做市商综合评分（Binance+OKX+Bybit+HL）
+/mm BTC cross — 只看跨所费率/OI 分布
+/mm scan — 全市场快扫（HL 数据）
 
 *Agent 智能交易*
-/agent scan — 全市场多因子分析
 /agent status — Agent 状态与近期决策
+/agent decide — 生成下一步决策
 /agent history — 历史决策记录
+/agent scan — 等同于 /alerts
 
 *数据上下文整理（配合 AI Agent 使用）*
 /ask 现在 SOL 适合做多吗？ — 整理市场数据 + 附问题，供 @AI Agent 分析
@@ -334,10 +343,9 @@ HELP_TEXT = r"""🤖 *Clawie 指令列表*
 /grid BTC 90000 100000 10 50 — 创建网格（低价 高价 格数 每格USD）
 /grid — 查看网格状态
 /grid cancel <grid\_id> — 取消网格
-/backtest — 运行资金费策略回测
 
 *快捷查询*
-/BTC /ETH /SOL 等任意交易对 — 价格 + 资金费率 + OI"""
+/BTC /ETH /SOL 等任意交易对 — 跨所实时价格 + 资金费率"""
 
 # ── 命令路由 ──────────────────────────────────────────────────────────────────
 
@@ -545,14 +553,33 @@ def _route(chat_id: int, cmd: str, args: list, thread_id: int = None):
         r = skill("hl_monitor").run(action="liquidation")
         send(chat_id, r["text"], thread_id=_tid(TOPIC_POSITION))
 
-    # ── HL 市场 ──────────────────────────────────────────────────────────────
+    # ── 市场总览（跨所价格 + FNG + HL 账户摘要）────────────────────────────
     elif cmd == "market":
-        r = skill("hl_monitor").run(action="overview")
-        send(chat_id, r["text"], thread_id=_tid(TOPIC_MARKET))
+        # 1. 跨所行情（Binance/WS 实时价格 + FNG）
+        r_mkt = skill("crypto_data").run(action="overview")
+        # 2. HL 账户摘要（仅当有私钥时）
+        r_acc = skill("hl_monitor").run(action="account")
+        combined = r_mkt["text"]
+        # 追加账户摘要（提取简短版）
+        if r_acc.get("success") and r_acc.get("data"):
+            d = r_acc["data"]
+            acct_val   = d.get("account_value_usdc", 0)
+            positions  = d.get("positions", [])
+            pos_count  = len(positions)
+            pnl        = sum(p.get("unrealized_pnl", 0) for p in positions)
+            liq_alerts = d.get("liq_alerts", [])
+            liq_note   = f" | ⚠️ 爆仓预警 {len(liq_alerts)} 个" if liq_alerts else ""
+            combined += (
+                f"\n\n*HL 账户*\n"
+                f"账户价值：`${acct_val:,.2f}` | 持仓：`{pos_count}` 个"
+                f" | 浮盈：`{pnl:+,.2f}`{liq_note}"
+            )
+        send(chat_id, combined, thread_id=_tid(TOPIC_MARKET))
 
     elif cmd == "funding":
-        symbol = args[0].upper() if args else None
-        r = skill("hl_monitor").run(action="funding", symbol=symbol)
+        # 跨所资金费率（Binance+OKX+Bybit+HL），无 symbol 默认 BTC
+        symbol = args[0].upper() if args else "BTC"
+        r = skill("exchange_agg").run(action="funding", symbol=symbol)
         send(chat_id, r["text"], thread_id=_tid(TOPIC_MARKET))
 
     elif cmd == "oi":
@@ -596,12 +623,15 @@ def _route(chat_id: int, cmd: str, args: list, thread_id: int = None):
         send(chat_id, r["text"], thread_id=_tid(TOPIC_MARKET))
 
     # ── 快讯 ─────────────────────────────────────────────────────────────────
-    elif cmd == "news":
-        r = skill("crypto_news").run(action="latest")
-        send(chat_id, r["text"], thread_id=_tid(TOPIC_MARKET))
-
-    elif cmd == "hlnews":
-        r = skill("crypto_news").run(action="hl")
+    # /news        — 最新10条
+    # /news hl     — HL 相关（/hlnews 是别名）
+    # /news <kw>   — 关键词过滤
+    elif cmd in ("news", "hlnews", "快讯"):
+        sub = args[0].lower() if args else None
+        if cmd == "hlnews" or sub == "hl":
+            r = skill("crypto_news").run(action="hl")
+        else:
+            r = skill("crypto_news").run(action="latest")
         send(chat_id, r["text"], thread_id=_tid(TOPIC_MARKET))
 
     # ── 信号 ─────────────────────────────────────────────────────────────────
@@ -788,7 +818,18 @@ def _route(chat_id: int, cmd: str, args: list, thread_id: int = None):
             r = skill("hl_trade").run(action="leverage", symbol=sym,
                                       leverage=lev, margin_mode=mode)
         else:
-            r = skill("hl_trade").run(action="positions")
+            # /trade 无参数 → 显示用法（避免与 /position 重复）
+            send(chat_id,
+                 "📋 *交易指令用法*\n\n"
+                 "`/trade open ETH long 100` — 做多 ETH $100\n"
+                 "`/trade open BTC short 200 3` — 做空 BTC $200 3倍杠杆\n"
+                 "`/trade close ETH` — 平仓 ETH\n"
+                 "`/trade cancel ETH 12345` — 撤单\n"
+                 "`/trade leverage ETH 5 cross` — 设置杠杆\n\n"
+                 "查看持仓用 /position\n"
+                 "指定交易所在最后加 `binance` / `okx` / `bybit`",
+                 thread_id=_tid(TOPIC_TRADE))
+            return
         send(chat_id, r["text"], thread_id=_tid(TOPIC_TRADE))
 
     # ── 专项追踪 ─────────────────────────────────────────────────────────────
@@ -948,10 +989,22 @@ def _route(chat_id: int, cmd: str, args: list, thread_id: int = None):
              f"此期间新开仓不受每日亏损限制，请谨慎操作。",
              thread_id=_tid(TOPIC_TRADE))
 
-    # ── 快捷查询任意交易对 ────────────────────────────────────────────────────
+    # ── 快捷查询任意交易对（跨所价格 + 资金费率）────────────────────────────
     elif cmd.upper() in known_symbols():
-        r = skill("hl_monitor").run(action="funding", symbol=cmd.upper())
-        send(chat_id, r["text"], thread_id=_tid(TOPIC_MARKET))
+        sym = cmd.upper()
+        # 价格（WS/Binance 实时）
+        r_price = skill("crypto_data").run(action="price", symbol=sym)
+        # 跨所资金费率
+        r_fund  = skill("exchange_agg").run(action="funding", symbol=sym)
+        msg = r_price["text"]
+        if r_fund.get("success"):
+            # 只取第一行（费率排行）避免太长
+            fund_lines = r_fund["text"].split("\n")
+            # 去掉标题行，取前5条费率
+            rate_lines = [l for l in fund_lines if l.startswith(("🔴", "🟡", "🟢"))][:5]
+            if rate_lines:
+                msg += "\n\n" + "\n".join(rate_lines)
+        send(chat_id, msg, thread_id=_tid(TOPIC_MARKET))
 
     # ── 多交易所聚合查询 ──────────────────────────────────────────────────────
     elif cmd in ("compare", "cmp", "对比"):
@@ -960,6 +1013,7 @@ def _route(chat_id: int, cmd: str, args: list, thread_id: int = None):
         send(chat_id, r["text"], thread_id=_tid(TOPIC_MARKET))
 
     elif cmd in ("exfunding", "xfunding", "跨所费率"):
+        # 别名：与 /funding 完全相同
         sym = args[0].upper() if args else "BTC"
         r   = skill("exchange_agg").run(action="funding", symbol=sym)
         send(chat_id, r["text"], thread_id=_tid(TOPIC_MARKET))
@@ -1000,21 +1054,30 @@ def _route(chat_id: int, cmd: str, args: list, thread_id: int = None):
         send(chat_id, r["text"], thread_id=_tid(TOPIC_MARKET))
 
     # ── Agent 智能交易 ────────────────────────────────────────────────────────
+    # /agent scan   → 与 /alerts 相同（多因子信号扫描）
+    # /agent status → Agent 决策状态
+    # /agent decide → 生成下一步决策
+    # /agent history → 历史决策记录
     elif cmd == "agent":
         sub = args[0].lower() if args else "status"
         if sub in ("scan", "analyze", "分析"):
-            send(chat_id, "🤖 Agent 正在分析市场...", thread_id=_tid(TOPIC_TRADE))
+            # 等同于 /alerts
+            send(chat_id, "🤖 正在扫描市场...", thread_id=_tid(TOPIC_ALERT))
             r = skill("agent_trade").run(action="analyze")
+            send(chat_id, r["text"], thread_id=_tid(TOPIC_ALERT))
         elif sub in ("status", "状态"):
             r = skill("agent_trade").run(action="status")
+            send(chat_id, r["text"], thread_id=_tid(TOPIC_TRADE))
         elif sub in ("history", "历史"):
             r = skill("agent_trade").run(action="history")
+            send(chat_id, r["text"], thread_id=_tid(TOPIC_TRADE))
         elif sub in ("decide", "决策"):
             send(chat_id, "🤖 Agent 正在生成决策...", thread_id=_tid(TOPIC_TRADE))
             r = skill("agent_trade").run(action="decide")
+            send(chat_id, r["text"], thread_id=_tid(TOPIC_TRADE))
         else:
             r = skill("agent_trade").run(action="status")
-        send(chat_id, r["text"], thread_id=_tid(TOPIC_TRADE))
+            send(chat_id, r["text"], thread_id=_tid(TOPIC_TRADE))
 
     # ── 数据上下文整理（供群组内 AI Agent 分析）─────────────────────────────
     elif cmd in ("ask", "分析"):
@@ -1226,16 +1289,15 @@ def _route(chat_id: int, cmd: str, args: list, thread_id: int = None):
 
 def register_commands():
     our_commands = [
-        {"command": "market",   "description": "市场概览（资金费率+情绪+账户摘要）"},
+        {"command": "market",   "description": "跨所行情+恐慌贪婪+HL账户摘要"},
         {"command": "position", "description": "我的持仓明细和余额"},
-        {"command": "funding",  "description": "资金费率排行，/funding BTC 查指定币种"},
+        {"command": "funding",  "description": "跨所资金费率对比，/funding BTC 查指定币种"},
         {"command": "oi",       "description": "未平仓量排行，/oi BTC 查指定币种"},
         {"command": "liq",      "description": "爆仓风险评估"},
         {"command": "price",    "description": "实时价格，/price ETH 查指定币种"},
         {"command": "fng",      "description": "恐慌贪婪指数"},
         {"command": "ta",       "description": "技术分析，/ta BTC 4h signal"},
-        {"command": "news",     "description": "最新快讯（前10条）"},
-        {"command": "hlnews",   "description": "Hyperliquid 相关快讯"},
+        {"command": "news",     "description": "最新快讯（前10条）| /news hl 查 HL 相关"},
         {"command": "alerts",   "description": "全部异动信号扫描"},
         {"command": "report",   "description": "今日市场报告"},
         {"command": "weekly",   "description": "本周复盘报告"},
