@@ -1,10 +1,10 @@
 """
 skills/focus — 单币种专项追踪
 用法：
-  /focus SOL [15]    — 开始追踪 SOL，每 15 分钟推送综合报告
-  /focus cancel      — 停止追踪
-  /focus status      — 查看当前追踪配置
-  /focus report      — 立即生成一份报告
+  /track SOL [15]    — 开始追踪 SOL，每 15 分钟推送综合报告
+  /track cancel      — 停止追踪
+  /track status      — 查看当前追踪配置
+  /track report      — 立即整理数据，交 AI Agent 分析
 
 报告内容：
   • 实时价格 + 24h 涨跌 + 资金费率

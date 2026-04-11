@@ -107,11 +107,11 @@ pm2 logs clawie-scheduler
 ### Focus Tracking
 | Command | Description |
 |---|---|
-| `/focus SOL` | Start auto-tracking SOL every 15 min |
-| `/focus SOL 30` | Custom interval (minutes) |
-| `/focus report` | Generate report immediately |
-| `/focus status` | View tracking config |
-| `/focus cancel` | Stop tracking |
+| `/track SOL` | Start auto-tracking SOL every 15 min |
+| `/track SOL 30` | Custom interval (minutes) |
+| `/track report` | Generate report immediately |
+| `/track status` | View tracking config |
+| `/track cancel` | Stop tracking |
 
 ### Market Maker Phase Analysis
 | Command | Description |

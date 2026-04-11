@@ -202,44 +202,49 @@ def known_symbols() -> set:
 
 ONBOARD_TEXT = r"""👋 *欢迎使用 Clawie！*
 
-我是一个 Hyperliquid 永续合约交易助手，可以帮你：
-• 监控资金费率、持仓风险、市场异动
-• 自动发送预警通知
-• 手动或自动执行永续合约交易
+我是你的加密货币交易 + 行情助手，包含两部分：
+• *AK Bot*（我）— 命令驱动，实时数据、下单、报告
+• *AI Agent*（群里的 @DigentZach）— 智能分析，@他 可以问任何问题
 
 ─────────────────────────
-*第一步：查看市场*
+*Step 1 — 先看市场*
 
-/market — 市场总览（资金费率 + 情绪 + 账户）
-/funding — 资金费率排行（做多前必看！）
-/alerts — 当前异动信号扫描
+/market — 市场总览（资金费率 + 恐慌贪婪 + 账户）
+/funding BTC — 指定币种资金费率详情
+/alerts — 异动信号扫描
+/ta BTC 1h — BTC 1小时技术分析（RSI / MA / BB / MACD）
 
 ─────────────────────────
-*第二步：查看我的账户*
+*Step 2 — 查看账户*
 
 /position — 我的持仓和余额
 /liq — 爆仓风险评估
 
 ─────────────────────────
-*第三步：手动下单*
+*Step 3 — 跨所比较*
 
-点击下方按钮或直接发命令：
+/compare ETH — 跨所价格对比（Binance / OKX / Bybit / Gate / HL）
+/exfunding BTC — 跨所资金费率对比 + 套利机会提示
+/divergence — 主流币价差异动扫描
+
+─────────────────────────
+*Step 4 — 交易*
 
 `/trade open ETH long 100` — 做多 ETH $100
-`/trade open BTC short 200 3` — 做空 BTC $200，3倍杠杆
 `/trade close ETH` — 平仓 ETH
-
-⚠️ 首次使用建议先在 .env 设置 `HL_USE_TESTNET=true` 用测试网练习
-
-─────────────────────────
-*第四步（进阶）：自动交易*
-
-让 Bot 根据资金费率信号自动开平仓：
-/autotrade — 查看自动交易状态和开启方式
+⚠️ 首次使用建议先设置 `HL_USE_TESTNET=true`
 
 ─────────────────────────
-/status — 查看 Bot 运行状态
-/help — 完整指令列表"""
+*Step 5 — AI 深度分析*
+
+/ask 现在做多 SOL 合适吗？ — 整理市场数据供 AI Agent 分析
+/deep BTC — 整理 BTC 深度数据（MM 阶段 + 跨所费率）
+/advice — 分析当前持仓，让 AI Agent 给出操作建议
+/track SOL 15 — 每 15 分钟追踪 SOL，/track report 立即生成
+
+─────────────────────────
+/status — Bot 运行状态
+/help — 完整指令列表（所有命令）"""
 
 HELP_TEXT = r"""🤖 *Clawie 指令列表*
 
@@ -303,6 +308,13 @@ HELP_TEXT = r"""🤖 *Clawie 指令列表*
 /ask 现在 SOL 适合做多吗？ — 整理市场数据 + 附问题，供 @AI Agent 分析
 /deep BTC — 整理指定币种深度数据（MM 阶段 + 跨所费率）
 /advice — 整理当前持仓数据，供 @AI Agent 给出操作建议
+
+*专项追踪*
+/track SOL — 开始追踪 SOL，每 15 分钟自动推送报告
+/track SOL 30 — 指定推送间隔（分钟）
+/track report — 立即整理数据供 AI Agent 深度分析
+/track status — 查看当前追踪配置
+/track cancel — 停止追踪
 
 *链上监控*
 /watch add ETH 0x1234... 标签 — 添加地址监控
